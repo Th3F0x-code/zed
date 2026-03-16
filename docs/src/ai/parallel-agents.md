@@ -39,8 +39,6 @@ To remove a project from the Threads Panel, click the close button on its header
 Q: What happens if I remove all of the projects in my window, while I have a project open?
 A: You cannot remove the currently open project. However, if you do not have any projects open in the window, then we will show the empty state.
 
-----SIDE THOUGHT: If the opened state is so important, can we show it in the sidebar somehow? But this is hard in the presence of git worktrees...-----
-
 Q: What happens if I have a running thread and remove its project from my window?
 A: That thread will stop running.
 
@@ -61,39 +59,6 @@ For each thread started via this new worktree option, a corresponding thread ent
 > Worktrees without threads will not show up in the Threads Panel, only their original repository will be shown.
 
 
---- SIDE THOUGHT ----
-These notes, and the one above about representing the "open" state, are all tangled up with worktrees not being full-fledged projects. What if we fixed that?
-
-Essentially moving from this:
-
-```
-zed
-    Thread 1 {selectric}
-    Thread 2 {selectric}
-    Thread 3 {olivetti}
-    Thread 4 {olivetti}
-    Thread 5
-    Thread 6
-```
-
-To this:
-
-```
-zed {selectric}
-    Thread 1
-    Thread 2
-
-zed {olivetti}
-    Thread 3
-    Thread 4
-
-zed
-    Thread 5
-    Thread 6
-```
------ /SIDE THOUGHT -----
-
-
 Q: What about worktrees made outside of Zed? How do I get them into the Threads Panel?
 A: Simply open each folder, like you would any other folder, and then click the agent panel and start typing. The new thread with the worktree chip will appear automatically in the Threads Panel once you submit your prompt.
 
@@ -102,8 +67,6 @@ A: Open the projects like you would in Zed normally (cmd-o to select the folder,
 
 Q: How do I open each worktree in a separate window?
 A: Open a window and select the folders for those worktrees.
-
-----SIDE THOUGHT: This feels like a clunky answer, perhaps we want a smoother way of doing this?-----
 
 ## See Also
 
