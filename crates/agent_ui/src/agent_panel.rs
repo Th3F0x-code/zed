@@ -4998,6 +4998,15 @@ impl AgentPanel {
     pub fn close_start_thread_in_menu_for_tests(&mut self, cx: &mut Context<Self>) {
         self.start_thread_in_menu_handle.hide(cx);
     }
+
+    /// Sets the panel width.
+    ///
+    /// This is a test-only helper for visual tests that need to control the
+    /// panel width without going through the `Panel` trait (which `AgentPanel`
+    /// no longer implements).
+    pub fn set_width_for_tests(&mut self, width: Option<Pixels>) {
+        self.width = width;
+    }
 }
 
 #[cfg(test)]
@@ -5981,6 +5990,8 @@ mod tests {
         );
     }
 
+    const CODEX_NAME: &str = "codex-acp";
+
     #[gpui::test]
     async fn test_worktree_creation_preserves_selected_agent(cx: &mut TestAppContext) {
         init_test(cx);
@@ -6036,7 +6047,7 @@ mod tests {
                         let panel = cx.new(|cx| {
                             AgentPanel::new(workspace, text_thread_store, None, window, cx)
                         });
-                        workspace.add_panel(panel, window, cx);
+                        workspace.set_left_drawer(panel, cx);
                     }
                 },
             )
@@ -6052,7 +6063,7 @@ mod tests {
             let text_thread_store = cx.new(|cx| TextThreadStore::fake(project.clone(), cx));
             let panel =
                 cx.new(|cx| AgentPanel::new(workspace, text_thread_store, None, window, cx));
-            workspace.add_panel(panel.clone(), window, cx);
+            workspace.set_left_drawer(panel.clone(), cx);
             panel
         });
 
@@ -6074,7 +6085,7 @@ mod tests {
         // open_external_thread_with_server overrides selected_agent_type.
         panel.update(cx, |panel, cx| {
             panel.selected_agent_type = AgentType::Custom {
-                name: CODEX_NAME.into(),
+                id: CODEX_NAME.into(),
             };
             panel.set_start_thread_in(&StartThreadIn::NewWorktree, cx);
         });
@@ -6084,7 +6095,7 @@ mod tests {
             assert_eq!(
                 panel.selected_agent_type,
                 AgentType::Custom {
-                    name: CODEX_NAME.into()
+                    id: CODEX_NAME.into()
                 },
             );
         });
@@ -6119,7 +6130,7 @@ mod tests {
                     .expect("should find the new workspace");
                 let new_panel = new_workspace
                     .read(cx)
-                    .panel::<AgentPanel>(cx)
+                    .drawer::<AgentPanel>()
                     .expect("new workspace should have an AgentPanel");
 
                 new_panel.read(cx).selected_agent_type.clone()
@@ -6129,7 +6140,7 @@ mod tests {
         assert_eq!(
             found_codex,
             AgentType::Custom {
-                name: CODEX_NAME.into()
+                id: CODEX_NAME.into()
             },
             "the new worktree workspace should use the same agent (Codex) that was selected in the original panel",
         );

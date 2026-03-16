@@ -119,7 +119,7 @@ use {
         time::Duration,
     },
     util::ResultExt as _,
-    workspace::{AppState, MultiWorkspace, Panel as _, Workspace},
+    workspace::{AppState, MultiWorkspace, Workspace},
     zed_actions::OpenSettingsAt,
 };
 
@@ -2147,9 +2147,9 @@ fn run_agent_thread_view_test(
 
     cx.update_window(workspace_window.into(), |_, _window, cx| {
         workspace_window
-            .update(cx, |workspace, window, cx| {
-                workspace.add_panel(panel.clone(), window, cx);
-                workspace.open_panel::<AgentPanel>(window, cx);
+            .update(cx, |workspace, _window, cx| {
+                workspace.set_left_drawer(panel.clone(), cx);
+                workspace.open_drawer::<AgentPanel>(cx);
             })
             .log_err();
     })?;
@@ -3268,8 +3268,8 @@ edition = "2021"
 
     // Register an observer so that workspaces created by the worktree creation
     // flow get AgentPanel and ProjectPanel loaded automatically. Without this,
-    // `workspace.panel::<AgentPanel>(cx)` returns None in the new workspace and
-    // the creation flow's `focus_panel::<AgentPanel>` call is a no-op.
+    // `workspace.drawer::<AgentPanel>()` returns None in the new workspace and
+    // the creation flow's drawer focus call is a no-op.
     let _workspace_observer = cx.update({
         let prompt_builder = prompt_builder.clone();
         |cx| {
@@ -3287,10 +3287,10 @@ edition = "2021"
                             })
                             .log_err();
                     }
-                    if let Ok(panel) = agent_panel.await {
+                    if let Ok(drawer) = agent_panel.await {
                         workspace_handle
-                            .update_in(cx, |workspace, window, cx| {
-                                workspace.add_panel(panel, window, cx);
+                            .update_in(cx, |workspace, _window, cx| {
+                                workspace.set_left_drawer(drawer, cx);
                             })
                             .log_err();
                     }
@@ -3313,11 +3313,11 @@ edition = "2021"
     cx.background_executor.forbid_parking();
 
     workspace_window
-        .update(cx, |multi_workspace, window, cx| {
+        .update(cx, |multi_workspace, _window, cx| {
             let workspace = &multi_workspace.workspaces()[0];
             workspace.update(cx, |workspace, cx| {
-                workspace.add_panel(panel.clone(), window, cx);
-                workspace.open_panel::<AgentPanel>(window, cx);
+                workspace.set_left_drawer(panel.clone(), cx);
+                workspace.open_drawer::<AgentPanel>(cx);
             });
         })
         .context("Failed to add and open AgentPanel")?;
@@ -3512,9 +3512,9 @@ edition = "2021"
     workspace_window.update(cx, |multi_workspace, window, cx| {
         let new_workspace = &multi_workspace.workspaces()[1];
         new_workspace.update(cx, |workspace, cx| {
-            if let Some(new_panel) = workspace.panel::<AgentPanel>(cx) {
+            if let Some(new_panel) = workspace.drawer::<AgentPanel>() {
                 new_panel.update(cx, |panel, cx| {
-                    panel.set_size(Some(px(480.0)), window, cx);
+                    panel.set_width_for_tests(Some(px(480.0)));
                     panel.open_external_thread_with_server(stub_agent.clone(), window, cx);
                 });
             }
@@ -3525,7 +3525,7 @@ edition = "2021"
     // Type and send a message so the thread target dropdown disappears.
     let new_panel = workspace_window.update(cx, |multi_workspace, _window, cx| {
         let new_workspace = &multi_workspace.workspaces()[1];
-        new_workspace.read(cx).panel::<AgentPanel>(cx)
+        new_workspace.read(cx).drawer::<AgentPanel>()
     })?;
     if let Some(new_panel) = new_panel {
         let new_thread_view = cx.read(|cx| new_panel.read(cx).active_thread_view(cx));
