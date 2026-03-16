@@ -2187,8 +2187,10 @@ mod tests {
         });
         cx.run_until_parked();
         let multi_workspace_entity = multi_workspace.clone();
-        let sidebar = workspace.update_in(cx, |_, window, cx| {
-            cx.new(|cx| ThreadsPanel::new(multi_workspace_entity, window, cx))
+        let sidebar = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| ThreadsPanel::new(multi_workspace_entity, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
         });
         (sidebar, panel)
     }
@@ -2239,10 +2241,17 @@ mod tests {
 
     fn open_and_focus_sidebar(sidebar: &Entity<ThreadsPanel>, cx: &mut gpui::VisualTestContext) {
         cx.run_until_parked();
-        sidebar.update_in(cx, |sidebar, window, cx| {
-            sidebar.set_open(true, cx);
-            cx.focus_self(window);
+        let workspace = sidebar.read_with(cx, |sidebar, cx| {
+            sidebar
+                .multi_workspace
+                .upgrade()
+                .map(|mw| mw.read(cx).workspace().clone())
         });
+        if let Some(workspace) = workspace {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.focus_panel::<ThreadsPanel>(window, cx);
+            });
+        }
         cx.run_until_parked();
     }
 
@@ -2906,8 +2915,16 @@ mod tests {
         });
         cx.run_until_parked();
 
-        // Add an agent panel to workspace 1 so the sidebar renders when it's active.
+        // Switch to workspace 1 and add panels so the sidebar renders when it's active.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.activate_index(1, window, cx);
+        });
         setup_sidebar_with_agent_panel(&multi_workspace, cx);
+        // Switch back to workspace 0.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.activate_index(0, window, cx);
+        });
+        cx.run_until_parked();
 
         let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
         save_n_test_threads(1, &path_list, cx).await;
@@ -2934,9 +2951,14 @@ mod tests {
             1
         );
 
+        // Get workspace 1's ThreadsPanel (each workspace has its own).
+        let sidebar_1 = multi_workspace.read_with(cx, |mw, cx| {
+            mw.workspace().read(cx).panel::<ThreadsPanel>(cx).unwrap()
+        });
+
         // Focus the sidebar and manually select the header (index 0)
-        open_and_focus_sidebar(&sidebar, cx);
-        sidebar.update_in(cx, |sidebar, _window, _cx| {
+        open_and_focus_sidebar(&sidebar_1, cx);
+        sidebar_1.update_in(cx, |sidebar, _window, _cx| {
             sidebar.selection = Some(0);
         });
 
@@ -4092,15 +4114,14 @@ mod tests {
             );
         });
 
-        workspace_a.read_with(cx, |workspace, cx| {
+        workspace_a.read_with(cx, |workspace, _cx| {
             assert!(
                 workspace.drawer::<AgentPanel>().is_some(),
                 "Agent panel should exist"
             );
-            let dock = workspace.right_dock().read(cx);
             assert!(
-                dock.is_open(),
-                "Clicking a thread should open the agent panel dock"
+                workspace.drawer_is_open::<AgentPanel>(),
+                "Clicking a thread should open the agent panel drawer"
             );
         });
 
