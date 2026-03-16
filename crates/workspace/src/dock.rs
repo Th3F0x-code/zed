@@ -41,7 +41,7 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn size(&self, window: &Window, cx: &App) -> Pixels;
     fn set_size(&mut self, size: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>);
     fn icon_button(&self, window: &Window, cx: &App) -> PanelIconButton;
-    fn secondary_button(&self, _window: &Window, _cx: &App) -> Option<PanelIconButton> {
+    fn secondary_button(&self, _window: &Window, _cx: &App) -> Option<(PanelIconButton, bool)> {
         None
     }
     fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
@@ -79,7 +79,7 @@ pub trait PanelHandle: Send + Sync {
     fn size(&self, window: &Window, cx: &App) -> Pixels;
     fn set_size(&self, size: Option<Pixels>, window: &mut Window, cx: &mut App);
     fn icon_button(&self, window: &Window, cx: &App) -> PanelIconButton;
-    fn secondary_button(&self, window: &Window, cx: &App) -> Option<PanelIconButton>;
+    fn secondary_button(&self, window: &Window, cx: &App) -> Option<(PanelIconButton, bool)>;
     fn panel_focus_handle(&self, cx: &App) -> FocusHandle;
     fn to_any(&self) -> AnyView;
     fn activation_priority(&self, cx: &App) -> u32;
@@ -161,7 +161,7 @@ where
         self.read(cx).icon_button(window, cx)
     }
 
-    fn secondary_button(&self, window: &Window, cx: &App) -> Option<PanelIconButton> {
+    fn secondary_button(&self, window: &Window, cx: &App) -> Option<(PanelIconButton, bool)> {
         self.read(cx).secondary_button(window, cx)
     }
 
@@ -982,12 +982,12 @@ impl Render for PanelButtons {
                                 });
 
                             match secondary_button {
-                                Some(secondary_button) => {
+                                Some((secondary_button, secondary_button_is_active)) => {
                                     let action = secondary_button.action.boxed_clone();
                                     let secondary_button =
                                         IconButton::new("secondary-button", secondary_button.icon)
                                             .icon_size(IconSize::Small)
-                                            .toggle_state(false) // todo! show active when drawer is open
+                                            .toggle_state(secondary_button_is_active)
                                             .on_click({
                                                 let action = action.boxed_clone();
                                                 move |_, window, cx| {

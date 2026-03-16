@@ -2113,12 +2113,21 @@ impl Panel for ThreadsPanel {
         }
     }
 
-    fn secondary_button(&self, _window: &Window, _cx: &App) -> Option<PanelIconButton> {
-        Some(PanelIconButton {
-            icon: IconName::ZedAssistant,
-            tooltip: "Agent Drawer",
-            action: Box::new(ToggleAgentDrawer),
-        })
+    fn secondary_button(&self, _window: &Window, cx: &App) -> Option<(PanelIconButton, bool)> {
+        let is_active = self
+            .multi_workspace
+            .read_with(cx, |mw, cx| {
+                mw.workspace().read(cx).drawer_is_open::<AgentPanel>()
+            })
+            .unwrap_or(false);
+        Some((
+            PanelIconButton {
+                icon: IconName::ZedAssistant,
+                tooltip: "Agent Drawer",
+                action: Box::new(ToggleAgentDrawer),
+            },
+            is_active,
+        ))
     }
 
     fn activation_priority(&self) -> u32 {
