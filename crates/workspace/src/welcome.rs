@@ -103,6 +103,9 @@ impl RenderOnce for SectionButton {
                     .w_full()
                     .justify_between()
                     .child(
+                        div().id("test-a11y-id").role(gpui::Role::Button).child("hello")
+                    )
+                    .child(
                         h_flex()
                             .gap_2()
                             .child(

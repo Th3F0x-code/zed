@@ -2543,9 +2543,11 @@ impl Window {
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector_hitbox(cx);
+        
 
         if self.is_a11y_active() {
             let tree_update = self.a11y_nodes.finalize();
+            // dbg!(&tree_update);
             self.platform_window.a11y_tree_update(tree_update);
         }
     }

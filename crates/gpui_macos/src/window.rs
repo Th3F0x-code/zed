@@ -2,6 +2,7 @@ use crate::{
     BoolExt, DisplayLink, MacDisplay, NSRange, NSStringExt, events::platform_input_from_native,
     ns_string, renderer,
 };
+use accesskit_macos::SubclassingAdapter;
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
 use block::ConcreteBlock;
@@ -113,11 +114,38 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+// todo! Apache license from accesskit_winit until end
+pub struct AdapterWrapper {
+    adapter: SubclassingAdapter,
+}
+
+impl AdapterWrapper {
+    pub unsafe fn new(
+        window: *mut c_void,
+        activation_handler: impl 'static + accesskit::ActivationHandler,
+        action_handler: impl 'static + accesskit::ActionHandler,
+    ) -> Self {
+        let adapter = unsafe { SubclassingAdapter::for_window(window, activation_handler, action_handler) };
+        Self { adapter }
+    }
+
+    pub fn update_if_active(&mut self, updater: impl FnOnce() -> accesskit::TreeUpdate) {
+        if let Some(events) = self.adapter.update_if_active(updater) {
+            events.raise();
+        }
+    }
+}
+// todo! end
+
 #[ctor]
 unsafe fn build_classes() {
     unsafe {
         WINDOW_CLASS = build_window_class("GPUIWindow", class!(NSWindow));
         PANEL_CLASS = build_window_class("GPUIPanel", class!(NSPanel));
+
+        accesskit_macos::add_focus_forwarder_to_window_class("GPUIWindow");
+        accesskit_macos::add_focus_forwarder_to_window_class("GPUIPanel");
+
         VIEW_CLASS = {
             let mut decl = ClassDecl::new("GPUIView", class!(NSView)).unwrap();
             decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
@@ -442,6 +470,7 @@ struct MacWindowState {
     activated_least_once: bool,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<id>,
+    accesskit: Option<AdapterWrapper>,
 }
 
 impl MacWindowState {
@@ -765,6 +794,7 @@ impl MacWindow {
                 toggle_tab_bar_callback: None,
                 activated_least_once: false,
                 sheet_parent: None,
+                accesskit: None,
             })));
 
             (*native_window).set_ivar(
@@ -1635,6 +1665,54 @@ impl PlatformWindow for MacWindow {
     fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
         let mut this = self.0.lock();
         this.renderer.render_to_image(scene)
+    }
+
+    fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
+        let mut state = self.0.lock();
+
+        if state.accesskit.is_some() {
+            panic!("cannot initialize accesskit twice");
+        }
+
+        // dbg!(state.native_window);
+        let window = state.native_window as *mut c_void;
+        // let native_view = state.native_view.as_ptr();
+        // unsafe {
+        //     eprintln!(
+        //         "[a11y] native_view class: {}",
+        //         (*native_view).class().name()
+        //     )
+        // };
+
+        let adapter = unsafe { AdapterWrapper::new(window, callbacks.activation, callbacks.action) };
+
+        unsafe {
+            let content_view: id = msg_send![state.native_window, contentView];
+            let class = (*content_view).class();
+            eprintln!(
+                "[a11y debug] Content view class after adapter: {}",
+                class.name()
+            );
+        }
+        state.accesskit = Some(adapter);
+    }
+
+    fn a11y_tree_update(&mut self, tree_update: accesskit::TreeUpdate) {
+        let mut state = self.0.lock();
+
+        let Some(adapter) = &mut state.accesskit else {
+            panic!("cannot update accesskit tree - not initialized");
+        };
+
+        adapter.update_if_active(|| tree_update);
+    }
+
+    fn a11y_update_window_bounds(&self) {
+        // todo! figure this out
+    }
+
+    fn is_a11y_active(&self) -> bool {
+        true
     }
 }
 
