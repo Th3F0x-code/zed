@@ -135,7 +135,30 @@ impl UndoManager {
             ProjectPanelOperation::Rename { old_path, new_path } => {
                 self.rename(old_path, new_path, cx)
             }
-            _ => Task::ready(vec![anyhow!("Not implemented.")]),
+            ProjectPanelOperation::Batch(operations) => {
+                // Ensure that, when redoing a batch of operations, we do these
+                // in the same order as they were passed to the batch, as there
+                // might be dependencies between them.
+                //
+                // For example, imagine the following batch of operations:
+                //
+                // 1. Create `src/`
+                // 2. Create `src/main.rs`
+                //
+                // If these are not done in order, there's no guarantee that the
+                // second one succeeds, as the command to redo the `src/main.rs`
+                // file creation might fail unless it also forces the parent
+                // directory to be created first.
+                let tasks: Vec<_> = operations
+                    .into_iter()
+                    .map(|operation| self.redo_operation(operation, cx))
+                    .collect();
+
+                Self::run_sequentially(tasks, cx)
+            }
+            ProjectPanelOperation::Create { .. } => Task::ready(vec![anyhow!(
+                "Redoing create operations is currently not supported."
+            )]),
         }
     }
 
@@ -231,13 +254,7 @@ impl UndoManager {
                     .map(|operation| self.undo_operation(operation, cx))
                     .collect();
 
-                cx.spawn(async move |_| {
-                    let mut errors = Vec::new();
-                    for task in tasks {
-                        errors.extend(task.await);
-                    }
-                    errors
-                })
+                Self::run_sequentially(tasks, cx)
             }
         }
     }
@@ -271,6 +288,27 @@ impl UndoManager {
         cx.spawn(async move |_| match task.await {
             Ok(_) => vec![],
             Err(err) => vec![err],
+        })
+    }
+
+    /// Awaits each task in `tasks` sequentially, collecting any errors.
+    ///
+    /// Sequential execution is important for [`ProjectPanelOperation::Batch`]
+    /// operations, where there may be ordering dependencies between tasks. For
+    /// example, a directory must be created before files can be placed inside
+    /// it.
+    fn run_sequentially(
+        tasks: Vec<Task<Vec<anyhow::Error>>>,
+        cx: &mut App,
+    ) -> Task<Vec<anyhow::Error>> {
+        cx.spawn(async move |_| {
+            let mut errors = Vec::new();
+
+            for task in tasks {
+                errors.extend(task.await);
+            }
+
+            errors
         })
     }
 
@@ -314,7 +352,7 @@ impl UndoManager {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use crate::{
         ProjectPanel, project_panel_tests,
         undo::{ProjectPanelOperation, UndoManager},
@@ -347,11 +385,34 @@ mod test {
         TestContext { project, panel }
     }
 
-    fn build_create_operation(worktree_id: WorktreeId, file_name: &str) -> ProjectPanelOperation {
+    pub(crate) fn build_create_operation(
+        worktree_id: WorktreeId,
+        file_name: &str,
+    ) -> ProjectPanelOperation {
         ProjectPanelOperation::Create {
             project_path: ProjectPath {
                 path: Arc::from(rel_path(file_name)),
                 worktree_id,
+            },
+        }
+    }
+
+    pub(crate) fn build_rename_operation(
+        worktree_id: WorktreeId,
+        from: &str,
+        to: &str,
+    ) -> ProjectPanelOperation {
+        let from_path = Arc::from(rel_path(from));
+        let to_path = Arc::from(rel_path(to));
+
+        ProjectPanelOperation::Rename {
+            old_path: ProjectPath {
+                worktree_id,
+                path: from_path,
+            },
+            new_path: ProjectPath {
+                worktree_id,
+                path: to_path,
             },
         }
     }

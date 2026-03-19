@@ -401,8 +401,6 @@ actions!(
         CompareMarkedFiles,
         /// Undoes the last file operation.
         Undo,
-        // TODO!: Improve documentation, this is not really what's happening is
-        // it?
         /// Redoes the last undone file operation.
         Redo,
     ]
