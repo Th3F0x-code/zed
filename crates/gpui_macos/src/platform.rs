@@ -7,8 +7,8 @@ use block::ConcreteBlock;
 use cocoa::{
     appkit::{
         NSApplication, NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular,
-        NSControl as _, NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSOpenPanel,
-        NSSavePanel, NSVisualEffectState, NSVisualEffectView, NSWindow,
+        NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSOpenPanel, NSSavePanel,
+        NSVisualEffectState, NSVisualEffectView, NSWindow,
     },
     base::{BOOL, NO, YES, id, nil, selector},
     foundation::{
@@ -297,7 +297,6 @@ impl MacPlatform {
                     action,
                     os_action,
                     checked,
-                    disabled,
                 } => {
                     // Note that this is intentionally using earlier bindings, whereas typically
                     // later ones take display precedence. See the discussion on
@@ -395,18 +394,13 @@ impl MacPlatform {
                     if *checked {
                         item.setState_(NSVisualEffectState::Active);
                     }
-                    item.setEnabled_(!disabled);
 
                     let tag = actions.len() as NSInteger;
                     let _: () = msg_send![item, setTag: tag];
                     actions.push(action.boxed_clone());
                     item
                 }
-                MenuItem::Submenu(Menu {
-                    name,
-                    items,
-                    disabled,
-                }) => {
+                MenuItem::Submenu(Menu { name, items }) => {
                     let item = NSMenuItem::new(nil).autorelease();
                     let submenu = NSMenu::new(nil).autorelease();
                     submenu.setDelegate_(delegate);
@@ -414,7 +408,6 @@ impl MacPlatform {
                         submenu.addItem_(Self::create_menu_item(item, delegate, actions, keymap));
                     }
                     item.setSubmenu_(submenu);
-                    item.setEnabled_(!disabled);
                     item.setTitle_(ns_string(name));
                     item
                 }
