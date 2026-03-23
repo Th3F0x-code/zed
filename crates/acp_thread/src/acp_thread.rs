@@ -322,6 +322,10 @@ impl ToolCall {
             self.status = status.into();
         }
 
+        if let Some(tool_name) = tool_name_from_meta(&meta) {
+            self.tool_name = Some(tool_name);
+        }
+
         if let Some(subagent_session_info) = subagent_session_info_from_meta(&meta) {
             self.subagent_session_info = Some(subagent_session_info);
         }
@@ -1009,6 +1013,33 @@ struct RunningTurn {
     send_task: Task<()>,
 }
 
+#[derive(Clone)]
+struct InferredEditCandidate {
+    buffer: Entity<Buffer>,
+    baseline_snapshot: text::BufferSnapshot,
+    existed_on_disk: bool,
+    was_dirty: bool,
+}
+
+#[derive(Clone)]
+enum InferredEditCandidateState {
+    Pending {
+        nonce: u64,
+    },
+    Ready {
+        nonce: u64,
+        candidate: InferredEditCandidate,
+    },
+}
+
+impl InferredEditCandidateState {
+    fn nonce(&self) -> u64 {
+        match self {
+            Self::Pending { nonce } | Self::Ready { nonce, .. } => *nonce,
+        }
+    }
+}
+
 pub struct AcpThread {
     session_id: acp::SessionId,
     work_dirs: Option<PathList>,
@@ -1029,6 +1060,10 @@ pub struct AcpThread {
     terminals: HashMap<acp::TerminalId, Entity<Terminal>>,
     pending_terminal_output: HashMap<acp::TerminalId, Vec<Vec<u8>>>,
     pending_terminal_exit: HashMap<acp::TerminalId, acp::TerminalExitStatus>,
+    inferred_edit_candidates:
+        HashMap<acp::ToolCallId, HashMap<PathBuf, InferredEditCandidateState>>,
+    finalizing_inferred_edit_tool_calls: HashSet<acp::ToolCallId>,
+    next_inferred_edit_candidate_nonce: u64,
     had_error: bool,
     /// The user's unsent prompt text, persisted so it can be restored when reloading the thread.
     draft_prompt: Option<Vec<acp::ContentBlock>>,
@@ -1216,6 +1251,9 @@ impl AcpThread {
             terminals: HashMap::default(),
             pending_terminal_output: HashMap::default(),
             pending_terminal_exit: HashMap::default(),
+            inferred_edit_candidates: HashMap::default(),
+            finalizing_inferred_edit_tool_calls: HashSet::default(),
+            next_inferred_edit_candidate_nonce: 0,
             had_error: false,
             draft_prompt: None,
             ui_scroll_position: None,
@@ -1320,7 +1358,7 @@ impl AcpThread {
                         status: ToolCallStatus::InProgress | ToolCallStatus::Pending,
                         ..
                     },
-                ) if call.diffs().next().is_some() => {
+                ) if call.diffs().next().is_some() || Self::should_infer_external_edits(call) => {
                     return true;
                 }
                 AgentThreadEntry::ToolCall(_) | AgentThreadEntry::AssistantMessage(_) => {}
@@ -1711,21 +1749,456 @@ impl AcpThread {
         cx.emit(AcpThreadEvent::Retry(status));
     }
 
+    fn should_infer_external_edits(tool_call: &ToolCall) -> bool {
+        tool_call.tool_name.is_none()
+            && tool_call.kind == acp::ToolKind::Edit
+            && !tool_call.locations.is_empty()
+    }
+
+    fn is_inferred_edit_terminal_status(status: &ToolCallStatus) -> bool {
+        matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed)
+    }
+
+    fn allocate_inferred_edit_candidate_nonce(&mut self) -> u64 {
+        let nonce = self.next_inferred_edit_candidate_nonce;
+        self.next_inferred_edit_candidate_nonce =
+            self.next_inferred_edit_candidate_nonce.wrapping_add(1);
+        nonce
+    }
+
+    fn remove_inferred_edit_candidate_if_matching(
+        &mut self,
+        tool_call_id: &acp::ToolCallId,
+        abs_path: &PathBuf,
+        nonce: u64,
+    ) {
+        let remove_tool_call =
+            if let Some(candidates) = self.inferred_edit_candidates.get_mut(tool_call_id) {
+                let should_remove = candidates
+                    .get(abs_path)
+                    .is_some_and(|candidate_state| candidate_state.nonce() == nonce);
+                if should_remove {
+                    candidates.remove(abs_path);
+                }
+                candidates.is_empty()
+            } else {
+                false
+            };
+
+        if remove_tool_call {
+            self.inferred_edit_candidates.remove(tool_call_id);
+            self.finalizing_inferred_edit_tool_calls
+                .remove(tool_call_id);
+        }
+    }
+
+    fn clear_inferred_edit_candidates_for_tool_calls(
+        &mut self,
+        tool_call_ids: impl IntoIterator<Item = acp::ToolCallId>,
+    ) {
+        for tool_call_id in tool_call_ids {
+            self.inferred_edit_candidates.remove(&tool_call_id);
+            self.finalizing_inferred_edit_tool_calls
+                .remove(&tool_call_id);
+        }
+    }
+
+    fn finalize_all_inferred_edit_tool_calls(&mut self, cx: &mut Context<Self>) {
+        let tool_call_ids = self
+            .inferred_edit_candidates
+            .keys()
+            .filter(|tool_call_id| {
+                self.tool_call(tool_call_id).is_some_and(|(_, tool_call)| {
+                    Self::should_infer_external_edits(tool_call)
+                        && Self::is_inferred_edit_terminal_status(&tool_call.status)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for tool_call_id in tool_call_ids {
+            self.finalize_inferred_edit_tool_call(tool_call_id, cx);
+        }
+    }
+
+    fn sync_inferred_edit_candidate_paths(
+        &mut self,
+        tool_call_id: &acp::ToolCallId,
+        locations: &[acp::ToolCallLocation],
+    ) {
+        let mut current_paths = HashSet::default();
+        for location in locations {
+            current_paths.insert(location.path.clone());
+        }
+
+        let remove_tool_call =
+            if let Some(candidates) = self.inferred_edit_candidates.get_mut(tool_call_id) {
+                candidates.retain(|path, _| current_paths.contains(path));
+                candidates.is_empty()
+            } else {
+                false
+            };
+
+        if remove_tool_call {
+            self.inferred_edit_candidates.remove(tool_call_id);
+            self.finalizing_inferred_edit_tool_calls
+                .remove(tool_call_id);
+        }
+    }
+
+    fn register_inferred_edit_locations(
+        &mut self,
+        tool_call_id: acp::ToolCallId,
+        locations: &[acp::ToolCallLocation],
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_inferred_edit_candidate_paths(&tool_call_id, locations);
+
+        let mut unique_paths = HashSet::default();
+        for location in locations {
+            let abs_path = location.path.clone();
+            if !unique_paths.insert(abs_path.clone()) {
+                continue;
+            }
+
+            let nonce = self.allocate_inferred_edit_candidate_nonce();
+            let candidates = self
+                .inferred_edit_candidates
+                .entry(tool_call_id.clone())
+                .or_default();
+            if candidates.contains_key(&abs_path) {
+                continue;
+            }
+
+            candidates.insert(
+                abs_path.clone(),
+                InferredEditCandidateState::Pending { nonce },
+            );
+
+            let project = self.project.clone();
+            let tool_call_id = tool_call_id.clone();
+            cx.spawn::<_, anyhow::Result<()>>(async move |this, cx| {
+                let open_buffer = project.update(cx, |project, cx| {
+                    let project_path = project.project_path_for_absolute_path(&abs_path, cx)?;
+                    Some(project.open_buffer(project_path, cx))
+                });
+
+                let Some(open_buffer) = open_buffer else {
+                    this.update(cx, |this, _| {
+                        this.remove_inferred_edit_candidate_if_matching(
+                            &tool_call_id,
+                            &abs_path,
+                            nonce,
+                        );
+                    })
+                    .ok();
+                    return Ok(());
+                };
+
+                let buffer = match open_buffer.await {
+                    Ok(buffer) => buffer,
+                    Err(_) => {
+                        this.update(cx, |this, _| {
+                            this.remove_inferred_edit_candidate_if_matching(
+                                &tool_call_id,
+                                &abs_path,
+                                nonce,
+                            );
+                        })
+                        .ok();
+                        return Ok(());
+                    }
+                };
+
+                let (baseline_snapshot, existed_on_disk, was_dirty) =
+                    buffer.read_with(cx, |buffer, _| {
+                        (
+                            buffer.text_snapshot(),
+                            buffer.file().is_some_and(|file| file.disk_state().exists()),
+                            buffer.is_dirty(),
+                        )
+                    });
+
+                this.update(cx, |this, _| {
+                    let Some(candidates) = this.inferred_edit_candidates.get_mut(&tool_call_id)
+                    else {
+                        return;
+                    };
+                    let Some(candidate_state) = candidates.get_mut(&abs_path) else {
+                        return;
+                    };
+                    if candidate_state.nonce() != nonce {
+                        return;
+                    }
+                    *candidate_state = InferredEditCandidateState::Ready {
+                        nonce,
+                        candidate: InferredEditCandidate {
+                            buffer,
+                            baseline_snapshot,
+                            existed_on_disk,
+                            was_dirty,
+                        },
+                    };
+                })
+                .ok();
+
+                Ok(())
+            })
+            .detach_and_log_err(cx);
+        }
+    }
+
+    fn finalize_inferred_edit_tool_call(
+        &mut self,
+        tool_call_id: acp::ToolCallId,
+        cx: &mut Context<Self>,
+    ) {
+        let should_finalize = self.tool_call(&tool_call_id).is_some_and(|(_, tool_call)| {
+            Self::should_infer_external_edits(tool_call)
+                && Self::is_inferred_edit_terminal_status(&tool_call.status)
+        });
+        if !should_finalize {
+            self.clear_inferred_edit_candidates_for_tool_calls([tool_call_id]);
+            return;
+        }
+
+        if !self
+            .finalizing_inferred_edit_tool_calls
+            .insert(tool_call_id.clone())
+        {
+            return;
+        }
+
+        let project = self.project.clone();
+        let action_log = self.action_log.clone();
+        cx.spawn::<_, anyhow::Result<()>>(async move |this, cx| {
+            const MAX_ATTEMPTS: usize = 3;
+            const ATTEMPT_DELAY: Duration = Duration::from_millis(50);
+
+            for attempt in 0..MAX_ATTEMPTS {
+                let (ready_candidates, has_pending) = this
+                    .read_with(cx, |this, _| {
+                        let Some(candidates) = this.inferred_edit_candidates.get(&tool_call_id)
+                        else {
+                            return (Vec::new(), false);
+                        };
+
+                        let mut ready_candidates = Vec::new();
+                        let mut has_pending = false;
+                        for (abs_path, candidate_state) in candidates {
+                            match candidate_state {
+                                InferredEditCandidateState::Pending { .. } => has_pending = true,
+                                InferredEditCandidateState::Ready { nonce, candidate } => {
+                                    ready_candidates.push((
+                                        abs_path.clone(),
+                                        *nonce,
+                                        candidate.clone(),
+                                    ));
+                                }
+                            }
+                        }
+
+                        (ready_candidates, has_pending)
+                    })
+                    .unwrap_or((Vec::new(), false));
+
+                if ready_candidates.is_empty() && !has_pending {
+                    break;
+                }
+
+                for (_, _, candidate) in &ready_candidates {
+                    let should_reload = candidate
+                        .buffer
+                        .read_with(cx, |buffer, _| !buffer.is_dirty());
+                    if !should_reload {
+                        continue;
+                    }
+
+                    let reload = project.update(cx, |project, cx| {
+                        let mut buffers = HashSet::default();
+                        buffers.insert(candidate.buffer.clone());
+                        project.reload_buffers(buffers, false, cx)
+                    });
+                    reload.await.log_err();
+                }
+
+                if !has_pending || attempt + 1 == MAX_ATTEMPTS {
+                    break;
+                }
+
+                cx.background_executor().timer(ATTEMPT_DELAY).await;
+            }
+
+            let ready_candidates = this
+                .read_with(cx, |this, _| {
+                    this.inferred_edit_candidates
+                        .get(&tool_call_id)
+                        .into_iter()
+                        .flat_map(|candidates| candidates.iter())
+                        .filter_map(|(abs_path, candidate_state)| match candidate_state {
+                            InferredEditCandidateState::Pending { .. } => None,
+                            InferredEditCandidateState::Ready { nonce, candidate } => {
+                                Some((abs_path.clone(), *nonce, candidate.clone()))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            let mut processed_candidates = Vec::new();
+            for (abs_path, nonce, candidate) in ready_candidates {
+                let still_current = this
+                    .read_with(cx, |this, _| {
+                        this.inferred_edit_candidates
+                            .get(&tool_call_id)
+                            .and_then(|candidates| candidates.get(&abs_path))
+                            .is_some_and(|candidate_state| candidate_state.nonce() == nonce)
+                    })
+                    .unwrap_or(false);
+                if !still_current {
+                    continue;
+                }
+
+                if candidate.was_dirty {
+                    processed_candidates.push((abs_path, nonce));
+                    continue;
+                }
+
+                let already_changed = action_log.read_with(cx, |action_log, cx| {
+                    action_log.has_changed_buffer(&candidate.buffer, cx)
+                });
+                if already_changed {
+                    processed_candidates.push((abs_path, nonce));
+                    continue;
+                }
+
+                let (current_snapshot, current_exists, current_dirty) =
+                    candidate.buffer.read_with(cx, |buffer, _| {
+                        (
+                            buffer.text_snapshot(),
+                            buffer.file().is_some_and(|file| file.disk_state().exists()),
+                            buffer.is_dirty(),
+                        )
+                    });
+
+                if current_dirty {
+                    processed_candidates.push((abs_path, nonce));
+                    continue;
+                }
+
+                let buffer_changed = current_snapshot.text() != candidate.baseline_snapshot.text();
+
+                if !candidate.existed_on_disk {
+                    if current_exists || buffer_changed {
+                        action_log.update(cx, |action_log, cx| {
+                            action_log.infer_buffer_created(
+                                candidate.buffer.clone(),
+                                candidate.baseline_snapshot.clone(),
+                                cx,
+                            );
+                        });
+                    }
+                    processed_candidates.push((abs_path, nonce));
+                } else if !current_exists {
+                    action_log.update(cx, |action_log, cx| {
+                        action_log.infer_buffer_deleted_from_snapshot(
+                            candidate.buffer.clone(),
+                            candidate.baseline_snapshot.clone(),
+                            cx,
+                        );
+                    });
+                    processed_candidates.push((abs_path, nonce));
+                } else if buffer_changed {
+                    action_log.update(cx, |action_log, cx| {
+                        action_log.infer_buffer_edited_from_snapshot(
+                            candidate.buffer.clone(),
+                            candidate.baseline_snapshot.clone(),
+                            cx,
+                        );
+                    });
+                    processed_candidates.push((abs_path, nonce));
+                } else {
+                    processed_candidates.push((abs_path, nonce));
+                }
+            }
+
+            this.update(cx, |this, cx| {
+                for (abs_path, nonce) in processed_candidates {
+                    this.remove_inferred_edit_candidate_if_matching(
+                        &tool_call_id,
+                        &abs_path,
+                        nonce,
+                    );
+                }
+
+                this.finalizing_inferred_edit_tool_calls
+                    .remove(&tool_call_id);
+
+                let should_retry = this
+                    .inferred_edit_candidates
+                    .get(&tool_call_id)
+                    .is_some_and(|candidates| !candidates.is_empty());
+
+                if should_retry {
+                    let tool_call_id = tool_call_id.clone();
+                    cx.spawn::<_, anyhow::Result<()>>(async move |this, cx| {
+                        cx.background_executor().timer(ATTEMPT_DELAY).await;
+                        this.update(cx, |this, cx| {
+                            this.finalize_inferred_edit_tool_call(tool_call_id, cx);
+                        })
+                        .ok();
+                        Ok(())
+                    })
+                    .detach_and_log_err(cx);
+                }
+            })
+            .ok();
+
+            Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn refresh_inferred_edit_tool_call(
+        &mut self,
+        tool_call_id: acp::ToolCallId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, tool_call)) = self.tool_call(&tool_call_id) else {
+            return;
+        };
+
+        let should_track = Self::should_infer_external_edits(tool_call);
+        let should_finalize = Self::is_inferred_edit_terminal_status(&tool_call.status);
+        let locations = tool_call.locations.clone();
+
+        if !should_track {
+            self.clear_inferred_edit_candidates_for_tool_calls([tool_call_id]);
+            return;
+        }
+
+        self.register_inferred_edit_locations(tool_call_id.clone(), &locations, cx);
+
+        if should_finalize {
+            self.finalize_inferred_edit_tool_call(tool_call_id, cx);
+        }
+    }
+
     pub fn update_tool_call(
         &mut self,
         update: impl Into<ToolCallUpdate>,
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let update = update.into();
+        let tool_call_id = update.id().clone();
         let languages = self.project.read(cx).languages().clone();
         let path_style = self.project.read(cx).path_style(cx);
 
-        let ix = match self.index_for_tool_call(update.id()) {
+        let ix = match self.index_for_tool_call(&tool_call_id) {
             Some(ix) => ix,
             None => {
                 // Tool call not found - create a failed tool call entry
                 let failed_tool_call = ToolCall {
-                    id: update.id().clone(),
+                    id: tool_call_id,
                     label: cx.new(|cx| Markdown::new("Tool call not found".into(), None, None, cx)),
                     kind: acp::ToolKind::Fetch,
                     content: vec![ToolCallContent::ContentBlock(ContentBlock::new(
@@ -1778,6 +2251,7 @@ impl AcpThread {
         }
 
         cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        self.refresh_inferred_edit_tool_call(tool_call_id, cx);
 
         Ok(())
     }
@@ -1849,7 +2323,8 @@ impl AcpThread {
             self.push_entry(AgentThreadEntry::ToolCall(call), cx);
         };
 
-        self.resolve_locations(id, cx);
+        self.resolve_locations(id.clone(), cx);
+        self.refresh_inferred_edit_tool_call(id, cx);
         Ok(())
     }
 
@@ -2211,6 +2686,7 @@ impl AcpThread {
                         Self::flush_streaming_text(&mut this.streaming_text_buffer, cx);
 
                         if r.stop_reason == acp::StopReason::MaxTokens {
+                            this.finalize_all_inferred_edit_tool_calls(cx);
                             this.had_error = true;
                             cx.emit(AcpThreadEvent::Error);
                             log::error!("Max tokens reached. Usage: {:?}", this.token_usage);
@@ -2220,6 +2696,7 @@ impl AcpThread {
                         let canceled = matches!(r.stop_reason, acp::StopReason::Cancelled);
                         if canceled {
                             this.mark_pending_tools_as_canceled();
+                            this.finalize_all_inferred_edit_tool_calls(cx);
                         }
 
                         // Handle refusal - distinguish between user prompt and tool call refusals
@@ -2247,6 +2724,20 @@ impl AcpThread {
                                     // User prompt was refused - truncate back to before the user message
                                     let range = user_msg_ix..this.entries.len();
                                     if range.start < range.end {
+                                        let removed_tool_call_ids = this.entries[user_msg_ix..]
+                                            .iter()
+                                            .filter_map(|entry| {
+                                                if let AgentThreadEntry::ToolCall(tool_call) = entry
+                                                {
+                                                    Some(tool_call.id.clone())
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect::<Vec<_>>();
+                                        this.clear_inferred_edit_candidates_for_tool_calls(
+                                            removed_tool_call_ids,
+                                        );
                                         this.entries.truncate(user_msg_ix);
                                         cx.emit(AcpThreadEvent::EntriesRemoved(range));
                                     }
@@ -2258,12 +2749,14 @@ impl AcpThread {
                             }
                         }
 
+                        this.finalize_all_inferred_edit_tool_calls(cx);
                         cx.emit(AcpThreadEvent::Stopped(r.stop_reason));
                         Ok(Some(r))
                     }
                     Err(e) => {
                         Self::flush_streaming_text(&mut this.streaming_text_buffer, cx);
 
+                        this.finalize_all_inferred_edit_tool_calls(cx);
                         this.had_error = true;
                         cx.emit(AcpThreadEvent::Error);
                         log::error!("Error in run turn: {:?}", e);
@@ -2283,6 +2776,7 @@ impl AcpThread {
 
         Self::flush_streaming_text(&mut self.streaming_text_buffer, cx);
         self.mark_pending_tools_as_canceled();
+        self.finalize_all_inferred_edit_tool_calls(cx);
 
         // Wait for the send task to complete
         cx.background_spawn(turn.send_task)
@@ -2358,8 +2852,19 @@ impl AcpThread {
                         .flat_map(|entry| entry.terminals())
                         .filter_map(|terminal| terminal.read(cx).id().clone().into())
                         .collect();
+                    let removed_tool_call_ids = this.entries[ix..]
+                        .iter()
+                        .filter_map(|entry| {
+                            if let AgentThreadEntry::ToolCall(tool_call) = entry {
+                                Some(tool_call.id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
 
                     let range = ix..this.entries.len();
+                    this.clear_inferred_edit_candidates_for_tool_calls(removed_tool_call_ids);
                     this.entries.truncate(ix);
                     cx.emit(AcpThreadEvent::EntriesRemoved(range));
 
@@ -3767,6 +4272,226 @@ mod tests {
             .unwrap();
 
         assert!(cx.read(|cx| !thread.read(cx).has_pending_edit_tool_calls()));
+    }
+
+    #[gpui::test]
+    async fn test_pending_edits_for_edit_tool_calls_with_locations(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(path!("/test"), json!({"file.txt": "one\ntwo\n"}))
+            .await;
+        let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("test", "Label")
+                            .kind(acp::ToolKind::Edit)
+                            .status(acp::ToolCallStatus::InProgress),
+                    ),
+                    cx,
+                )
+            })
+            .unwrap();
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        "test",
+                        acp::ToolCallUpdateFields::new()
+                            .locations(vec![acp::ToolCallLocation::new(path!("/test/file.txt"))]),
+                    )),
+                    cx,
+                )
+            })
+            .unwrap();
+
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| thread.read(cx).has_pending_edit_tool_calls()));
+    }
+
+    #[gpui::test]
+    async fn test_infer_external_modified_file_edits_from_tool_call_locations(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(path!("/test"), json!({"file.txt": "one\ntwo\n"}))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/test").as_ref()], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new(path!("/test"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("test", "Label")
+                            .kind(acp::ToolKind::Edit)
+                            .status(acp::ToolCallStatus::InProgress),
+                    ),
+                    cx,
+                )
+            })
+            .unwrap();
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        "test",
+                        acp::ToolCallUpdateFields::new()
+                            .locations(vec![acp::ToolCallLocation::new(path!("/test/file.txt"))]),
+                    )),
+                    cx,
+                )
+            })
+            .unwrap();
+
+        cx.run_until_parked();
+
+        fs.save(
+            path!("/test/file.txt").as_ref(),
+            &"one\ntwo\nthree\n".into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        "test",
+                        acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed),
+                    )),
+                    cx,
+                )
+            })
+            .unwrap();
+
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+
+        let action_log = thread.read_with(cx, |thread, _| thread.action_log().clone());
+        assert_eq!(
+            action_log.read_with(cx, |action_log, cx| action_log.changed_buffers(cx).len()),
+            1
+        );
+
+        action_log
+            .update(cx, |action_log, cx| action_log.reject_all_edits(None, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert_eq!(
+            String::from_utf8(fs.read_file_sync(path!("/test/file.txt")).unwrap()).unwrap(),
+            "one\ntwo\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_infer_external_created_file_edits_from_tool_call_locations(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(path!("/test"), json!({})).await;
+        let project = Project::test(fs.clone(), [path!("/test").as_ref()], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new(path!("/test"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("test", "Label")
+                            .kind(acp::ToolKind::Edit)
+                            .status(acp::ToolCallStatus::InProgress),
+                    ),
+                    cx,
+                )
+            })
+            .unwrap();
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        "test",
+                        acp::ToolCallUpdateFields::new()
+                            .locations(vec![acp::ToolCallLocation::new(path!("/test/new.txt"))]),
+                    )),
+                    cx,
+                )
+            })
+            .unwrap();
+
+        cx.run_until_parked();
+
+        fs.insert_file(path!("/test/new.txt"), "hello\n".as_bytes().to_vec())
+            .await;
+        cx.run_until_parked();
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        "test",
+                        acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed),
+                    )),
+                    cx,
+                )
+            })
+            .unwrap();
+
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+
+        let action_log = thread.read_with(cx, |thread, _| thread.action_log().clone());
+        assert_eq!(
+            action_log.read_with(cx, |action_log, cx| action_log.changed_buffers(cx).len()),
+            1
+        );
+
+        action_log
+            .update(cx, |action_log, cx| action_log.reject_all_edits(None, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert!(fs.read_file_sync(path!("/test/new.txt")).is_err());
     }
 
     #[gpui::test(iterations = 10)]

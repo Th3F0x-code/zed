@@ -615,6 +615,135 @@ impl ActionLog {
         tracked_buffer.schedule_diff_update(ChangeAuthor::Agent, cx);
     }
 
+    fn prime_tracked_buffer_from_snapshot(
+        &mut self,
+        buffer: Entity<Buffer>,
+        baseline_snapshot: text::BufferSnapshot,
+        status: TrackedBufferStatus,
+        cx: &mut Context<Self>,
+    ) {
+        let version = buffer.read(cx).version();
+        let diff_base = match &status {
+            TrackedBufferStatus::Created { .. } => Rope::default(),
+            TrackedBufferStatus::Modified | TrackedBufferStatus::Deleted => {
+                baseline_snapshot.as_rope().clone()
+            }
+        };
+
+        let tracked_buffer = self.track_buffer_internal(buffer, false, cx);
+        tracked_buffer.diff_base = diff_base;
+        tracked_buffer.snapshot = baseline_snapshot;
+        tracked_buffer.unreviewed_edits.clear();
+        tracked_buffer.status = status;
+        tracked_buffer.version = version;
+    }
+
+    pub fn has_changed_buffer(&self, buffer: &Entity<Buffer>, cx: &App) -> bool {
+        self.tracked_buffers
+            .get(buffer)
+            .is_some_and(|tracked_buffer| tracked_buffer.has_edits(cx))
+    }
+
+    pub fn infer_buffer_created(
+        &mut self,
+        buffer: Entity<Buffer>,
+        baseline_snapshot: text::BufferSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(linked_action_log) = &self.linked_action_log {
+            let linked_baseline_snapshot = baseline_snapshot.clone();
+            if !linked_action_log.read(cx).has_changed_buffer(&buffer, cx) {
+                linked_action_log.update(cx, |log, cx| {
+                    log.infer_buffer_created(buffer.clone(), linked_baseline_snapshot, cx);
+                });
+            }
+        }
+
+        self.update_file_read_time(&buffer, cx);
+        self.prime_tracked_buffer_from_snapshot(
+            buffer.clone(),
+            baseline_snapshot,
+            TrackedBufferStatus::Created {
+                existing_file_content: None,
+            },
+            cx,
+        );
+
+        if let Some(tracked_buffer) = self.tracked_buffers.get(&buffer) {
+            tracked_buffer.schedule_diff_update(ChangeAuthor::Agent, cx);
+        }
+    }
+
+    pub fn infer_buffer_edited_from_snapshot(
+        &mut self,
+        buffer: Entity<Buffer>,
+        baseline_snapshot: text::BufferSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(linked_action_log) = &self.linked_action_log {
+            let linked_baseline_snapshot = baseline_snapshot.clone();
+            if !linked_action_log.read(cx).has_changed_buffer(&buffer, cx) {
+                linked_action_log.update(cx, |log, cx| {
+                    log.infer_buffer_edited_from_snapshot(
+                        buffer.clone(),
+                        linked_baseline_snapshot,
+                        cx,
+                    );
+                });
+            }
+        }
+
+        self.update_file_read_time(&buffer, cx);
+        self.prime_tracked_buffer_from_snapshot(
+            buffer.clone(),
+            baseline_snapshot,
+            TrackedBufferStatus::Modified,
+            cx,
+        );
+
+        if let Some(tracked_buffer) = self.tracked_buffers.get(&buffer) {
+            tracked_buffer.schedule_diff_update(ChangeAuthor::Agent, cx);
+        }
+    }
+
+    pub fn infer_buffer_deleted_from_snapshot(
+        &mut self,
+        buffer: Entity<Buffer>,
+        baseline_snapshot: text::BufferSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(linked_action_log) = &self.linked_action_log {
+            let linked_baseline_snapshot = baseline_snapshot.clone();
+            if !linked_action_log.read(cx).has_changed_buffer(&buffer, cx) {
+                linked_action_log.update(cx, |log, cx| {
+                    log.infer_buffer_deleted_from_snapshot(
+                        buffer.clone(),
+                        linked_baseline_snapshot,
+                        cx,
+                    );
+                });
+            }
+        }
+
+        self.remove_file_read_time(&buffer, cx);
+        let has_linked_action_log = self.linked_action_log.is_some();
+        self.prime_tracked_buffer_from_snapshot(
+            buffer.clone(),
+            baseline_snapshot,
+            TrackedBufferStatus::Deleted,
+            cx,
+        );
+
+        if !has_linked_action_log {
+            buffer.update(cx, |buffer, cx| buffer.set_text("", cx));
+        }
+
+        if let Some(tracked_buffer) = self.tracked_buffers.get_mut(&buffer) {
+            tracked_buffer.version = buffer.read(cx).version();
+            tracked_buffer.schedule_diff_update(ChangeAuthor::Agent, cx);
+        }
+    }
+
     pub fn will_delete_buffer(&mut self, buffer: Entity<Buffer>, cx: &mut Context<Self>) {
         // Ok to propagate file read time removal to linked action log
         self.remove_file_read_time(&buffer, cx);
@@ -640,8 +769,11 @@ impl ActionLog {
             linked_action_log.update(cx, |log, cx| log.will_delete_buffer(buffer.clone(), cx));
         }
 
-        if has_linked_action_log && let Some(tracked_buffer) = self.tracked_buffers.get(&buffer) {
-            tracked_buffer.schedule_diff_update(ChangeAuthor::Agent, cx);
+        if let Some(tracked_buffer) = self.tracked_buffers.get_mut(&buffer) {
+            tracked_buffer.version = buffer.read(cx).version();
+            if has_linked_action_log {
+                tracked_buffer.schedule_diff_update(ChangeAuthor::Agent, cx);
+            }
         }
 
         cx.notify();
@@ -799,19 +931,27 @@ impl ActionLog {
                 task
             }
             TrackedBufferStatus::Deleted => {
-                buffer.update(cx, |buffer, cx| {
-                    buffer.set_text(tracked_buffer.diff_base.to_string(), cx)
-                });
-                let save = self
-                    .project
-                    .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx));
+                let current_version = buffer.read(cx).version();
+                if current_version != tracked_buffer.version {
+                    metrics.add_edits(tracked_buffer.unreviewed_edits.edits());
+                    self.tracked_buffers.remove(&buffer);
+                    cx.notify();
+                    Task::ready(Ok(()))
+                } else {
+                    buffer.update(cx, |buffer, cx| {
+                        buffer.set_text(tracked_buffer.diff_base.to_string(), cx)
+                    });
+                    let save = self
+                        .project
+                        .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx));
 
-                // Clear all tracked edits for this buffer and start over as if we just read it.
-                metrics.add_edits(tracked_buffer.unreviewed_edits.edits());
-                self.tracked_buffers.remove(&buffer);
-                self.buffer_read(buffer.clone(), cx);
-                cx.notify();
-                save
+                    // Clear all tracked edits for this buffer and start over as if we just read it.
+                    metrics.add_edits(tracked_buffer.unreviewed_edits.edits());
+                    self.tracked_buffers.remove(&buffer);
+                    self.buffer_read(buffer.clone(), cx);
+                    cx.notify();
+                    save
+                }
             }
             TrackedBufferStatus::Modified => {
                 let edits_to_restore = buffer.update(cx, |buffer, cx| {
@@ -3291,6 +3431,366 @@ mod tests {
             parent_log.read_with(cx, |log, _| log.file_read_time(&abs_path).is_none()),
             "parent should NOT get file_read_time from child's buffer_created"
         );
+    }
+
+    #[gpui::test]
+    async fn test_infer_buffer_edited_from_snapshot(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/dir"), json!({"file": "one\ntwo\n"}))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let file_path = project
+            .read_with(cx, |project, cx| project.find_project_path("dir/file", cx))
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(file_path, cx))
+            .await
+            .unwrap();
+
+        let baseline_snapshot = buffer.read_with(cx, |buffer, _| buffer.text_snapshot());
+
+        buffer.update(cx, |buffer, cx| buffer.set_text("one\ntwo\nthree\n", cx));
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+            .await
+            .unwrap();
+
+        cx.update(|cx| {
+            action_log.update(cx, |log, cx| {
+                log.infer_buffer_edited_from_snapshot(
+                    buffer.clone(),
+                    baseline_snapshot.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !unreviewed_hunks(&action_log, cx).is_empty(),
+            "inferred edit should produce reviewable hunks"
+        );
+
+        action_log
+            .update(cx, |log, cx| log.reject_all_edits(None, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert_eq!(
+            buffer.read_with(cx, |buffer, _| buffer.text()),
+            "one\ntwo\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_infer_buffer_created(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/dir"), json!({})).await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let file_path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path("dir/new_file", cx)
+            })
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(file_path, cx))
+            .await
+            .unwrap();
+
+        let baseline_snapshot = buffer.read_with(cx, |buffer, _| buffer.text_snapshot());
+
+        buffer.update(cx, |buffer, cx| buffer.set_text("hello\n", cx));
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+            .await
+            .unwrap();
+
+        cx.update(|cx| {
+            action_log.update(cx, |log, cx| {
+                log.infer_buffer_created(buffer.clone(), baseline_snapshot.clone(), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !unreviewed_hunks(&action_log, cx).is_empty(),
+            "inferred creation should produce reviewable hunks"
+        );
+
+        action_log
+            .update(cx, |log, cx| log.reject_all_edits(None, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert!(fs.read_file_sync(path!("/dir/new_file")).is_err());
+    }
+
+    #[gpui::test]
+    async fn test_infer_buffer_deleted_from_snapshot(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/dir"), json!({"file": "hello\n"}))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let file_path = project
+            .read_with(cx, |project, cx| project.find_project_path("dir/file", cx))
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(file_path, cx))
+            .await
+            .unwrap();
+
+        let baseline_snapshot = buffer.read_with(cx, |buffer, _| buffer.text_snapshot());
+
+        fs.remove_file(path!("/dir/file").as_ref(), RemoveOptions::default())
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            action_log.update(cx, |log, cx| {
+                log.infer_buffer_deleted_from_snapshot(
+                    buffer.clone(),
+                    baseline_snapshot.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !unreviewed_hunks(&action_log, cx).is_empty(),
+            "inferred deletion should produce reviewable hunks"
+        );
+
+        action_log
+            .update(cx, |log, cx| log.reject_all_edits(None, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert_eq!(
+            String::from_utf8(fs.read_file_sync(path!("/dir/file")).unwrap()).unwrap(),
+            "hello\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_infer_buffer_deleted_from_snapshot_preserves_later_user_edits_on_reject(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/dir"), json!({"file": "hello\n"}))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let file_path = project
+            .read_with(cx, |project, cx| project.find_project_path("dir/file", cx))
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(file_path, cx))
+            .await
+            .unwrap();
+
+        let baseline_snapshot = buffer.read_with(cx, |buffer, _| buffer.text_snapshot());
+
+        fs.remove_file(path!("/dir/file").as_ref(), RemoveOptions::default())
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            action_log.update(cx, |log, cx| {
+                log.infer_buffer_deleted_from_snapshot(
+                    buffer.clone(),
+                    baseline_snapshot.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        buffer.update(cx, |buffer, cx| buffer.append("world\n", cx));
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        action_log
+            .update(cx, |log, cx| log.reject_all_edits(None, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(cx, |buffer, _| buffer.text()), "world\n");
+        assert_eq!(
+            String::from_utf8(fs.read_file_sync(path!("/dir/file")).unwrap()).unwrap(),
+            "world\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_will_delete_buffer_preserves_later_user_edits_on_reject(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/dir"), json!({"file": "hello\n"}))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let file_path = project
+            .read_with(cx, |project, cx| project.find_project_path("dir/file", cx))
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(file_path.clone(), cx))
+            .await
+            .unwrap();
+
+        cx.update(|cx| {
+            action_log.update(cx, |log, cx| log.will_delete_buffer(buffer.clone(), cx));
+        });
+        project
+            .update(cx, |project, cx| project.delete_file(file_path, false, cx))
+            .unwrap()
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        buffer.update(cx, |buffer, cx| buffer.append("world\n", cx));
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        action_log
+            .update(cx, |log, cx| log.reject_all_edits(None, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(cx, |buffer, _| buffer.text()), "world\n");
+        assert_eq!(
+            String::from_utf8(fs.read_file_sync(path!("/dir/file")).unwrap()).unwrap(),
+            "world\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_infer_buffer_edited_from_snapshot_preserves_later_user_edits(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/dir"), json!({"file": "one\ntwo\n"}))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let file_path = project
+            .read_with(cx, |project, cx| project.find_project_path("dir/file", cx))
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(file_path, cx))
+            .await
+            .unwrap();
+
+        let baseline_snapshot = buffer.read_with(cx, |buffer, _| buffer.text_snapshot());
+
+        buffer.update(cx, |buffer, cx| buffer.set_text("one\ntwo\nthree\n", cx));
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+            .await
+            .unwrap();
+
+        cx.update(|cx| {
+            action_log.update(cx, |log, cx| {
+                log.infer_buffer_edited_from_snapshot(
+                    buffer.clone(),
+                    baseline_snapshot.clone(),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0..0, "zero\n")], None, cx);
+        });
+        cx.run_until_parked();
+
+        action_log
+            .update(cx, |log, cx| log.reject_all_edits(None, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert_eq!(
+            buffer.read_with(cx, |buffer, _| buffer.text()),
+            "zero\none\ntwo\n"
+        );
+        assert_eq!(
+            String::from_utf8(fs.read_file_sync(path!("/dir/file")).unwrap()).unwrap(),
+            "zero\none\ntwo\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_infer_buffer_created_preserves_later_user_edits_on_reject(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/dir"), json!({})).await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let file_path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path("dir/new_file", cx)
+            })
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(file_path, cx))
+            .await
+            .unwrap();
+
+        let baseline_snapshot = buffer.read_with(cx, |buffer, _| buffer.text_snapshot());
+
+        buffer.update(cx, |buffer, cx| buffer.set_text("hello\n", cx));
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+            .await
+            .unwrap();
+
+        cx.update(|cx| {
+            action_log.update(cx, |log, cx| {
+                log.infer_buffer_created(buffer.clone(), baseline_snapshot.clone(), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        buffer.update(cx, |buffer, cx| buffer.append("world\n", cx));
+        cx.run_until_parked();
+
+        action_log
+            .update(cx, |log, cx| log.reject_all_edits(None, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert_eq!(
+            buffer.read_with(cx, |buffer, _| buffer.text()),
+            "hello\nworld\n"
+        );
+        assert!(fs.read_file_sync(path!("/dir/new_file")).is_ok());
+        assert_eq!(unreviewed_hunks(&action_log, cx), vec![]);
     }
 
     #[derive(Debug, PartialEq)]
