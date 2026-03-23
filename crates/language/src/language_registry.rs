@@ -232,7 +232,7 @@ impl std::fmt::Display for LanguageNotFound {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, strum::Display, strum::EnumIter)]
+#[derive(Copy, Clone, PartialEq, Eq, strum::EnumIter)]
 #[strum(serialize_all = "snake_case")]
 pub enum LanguageQuery {
     Highlights,
@@ -275,8 +275,19 @@ impl LanguageQuery {
         folder_path.join(self.file_name())
     }
 
-    pub fn file_name(&self) -> String {
-        format!("{self}.scm")
+    pub const fn file_name(&self) -> &'static str {
+        match self {
+            LanguageQuery::Highlights => "highlights.scm",
+            LanguageQuery::Brackets => "brackets.scm",
+            LanguageQuery::Outline => "outline.scm",
+            LanguageQuery::Indents => "indents.scm",
+            LanguageQuery::Injections => "injections.scm",
+            LanguageQuery::Overrides => "overrides.scm",
+            LanguageQuery::Runnables => "runnables.scm",
+            LanguageQuery::Debugger => "debugger.scm",
+            LanguageQuery::Textobjects => "textobjects.scm",
+            LanguageQuery::Imports => "imports.scm",
+        }
     }
 }
 
