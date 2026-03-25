@@ -94,8 +94,36 @@ impl From<&ActiveThreadInfo> for acp_thread::AgentSessionInfo {
 
 #[derive(Clone)]
 enum ThreadEntryWorkspace {
-    Open(Entity<Workspace>),
-    Closed(PathList),
+    Main(Entity<Workspace>),
+    LinkedOpen {
+        worktree: Entity<Workspace>,
+        parent: Entity<Workspace>,
+    },
+    LinkedClosed {
+        path_list: PathList,
+        parent: Entity<Workspace>,
+    },
+}
+
+impl ThreadEntryWorkspace {
+    fn workspace(&self) -> Option<&Entity<Workspace>> {
+        match self {
+            Self::Main(ws) => Some(ws),
+            Self::LinkedOpen { worktree, .. } => Some(worktree),
+            Self::LinkedClosed { .. } => None,
+        }
+    }
+
+    fn is_open_worktree(&self) -> bool {
+        matches!(self, Self::LinkedOpen { .. })
+    }
+
+    fn parent_workspace(&self) -> &Entity<Workspace> {
+        match self {
+            Self::Main(ws) => ws,
+            Self::LinkedOpen { parent, .. } | Self::LinkedClosed { parent, .. } => parent,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -159,6 +187,7 @@ impl From<ThreadEntry> for ListEntry {
 #[derive(Default)]
 struct SidebarContents {
     entries: Vec<ListEntry>,
+    thread_indices: HashMap<acp::SessionId, usize>,
     notified_threads: HashSet<acp::SessionId>,
     project_header_indices: Vec<usize>,
     has_open_projects: bool,
@@ -167,6 +196,14 @@ struct SidebarContents {
 impl SidebarContents {
     fn is_thread_notified(&self, session_id: &acp::SessionId) -> bool {
         self.notified_threads.contains(session_id)
+    }
+
+    fn thread_entry(&self, session_id: &acp::SessionId) -> Option<(usize, &ThreadEntry)> {
+        let &ix = self.thread_indices.get(session_id)?;
+        match &self.entries[ix] {
+            ListEntry::Thread(t) => Some((ix, t)),
+            _ => None,
+        }
     }
 }
 
@@ -654,8 +691,8 @@ impl Sidebar {
             .collect();
 
         let mut entries = Vec::new();
+        let mut thread_indices: HashMap<acp::SessionId, usize> = HashMap::default();
         let mut notified_threads = previous.notified_threads;
-        let mut current_session_ids: HashSet<acp::SessionId> = HashSet::new();
         let mut project_header_indices: Vec<usize> = Vec::new();
 
         // Identify absorbed workspaces in a single pass. A workspace is
@@ -810,7 +847,7 @@ impl Sidebar {
                         icon,
                         icon_from_external_svg,
                         status: AgentThreadStatus::default(),
-                        workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                        workspace: ThreadEntryWorkspace::Main(workspace.clone()),
                         is_live: false,
                         is_background: false,
                         is_title_generating: false,
@@ -855,9 +892,15 @@ impl Sidebar {
                                         &workspaces[idx],
                                         cx,
                                     ));
-                                    ThreadEntryWorkspace::Open(workspaces[idx].clone())
+                                    ThreadEntryWorkspace::LinkedOpen {
+                                        worktree: workspaces[idx].clone(),
+                                        parent: workspace.clone(),
+                                    }
                                 }
-                                None => ThreadEntryWorkspace::Closed(worktree_path_list.clone()),
+                                None => ThreadEntryWorkspace::LinkedClosed {
+                                    path_list: worktree_path_list.clone(),
+                                    parent: workspace.clone(),
+                                },
                             };
 
                         let worktree_rows: Vec<_> = thread_store
@@ -943,12 +986,10 @@ impl Sidebar {
                         thread.diff_stats = info.diff_stats;
                     }
 
-                    let is_thread_workspace_active = match &thread.workspace {
-                        ThreadEntryWorkspace::Open(thread_workspace) => active_workspace
-                            .as_ref()
-                            .is_some_and(|active| active == thread_workspace),
-                        ThreadEntryWorkspace::Closed(_) => false,
-                    };
+                    let is_thread_workspace_active = thread
+                        .workspace
+                        .workspace()
+                        .is_some_and(|ws| active_workspace.as_ref() == Some(ws));
 
                     if thread.status == AgentThreadStatus::Completed
                         && !is_thread_workspace_active
@@ -961,12 +1002,6 @@ impl Sidebar {
                         notified_threads.remove(session_id);
                     }
                 }
-
-                threads.sort_by(|a, b| {
-                    let a_time = a.session_info.created_at.or(a.session_info.updated_at);
-                    let b_time = b.session_info.created_at.or(b.session_info.updated_at);
-                    b_time.cmp(&a_time)
-                });
             } else {
                 for info in &live_infos {
                     if info.status == AgentThreadStatus::Running {
@@ -1024,7 +1059,7 @@ impl Sidebar {
                 });
 
                 for thread in matched_threads {
-                    current_session_ids.insert(thread.session_info.session_id.clone());
+                    thread_indices.insert(thread.session_info.session_id.clone(), entries.len());
                     entries.push(thread.into());
                 }
             } else {
@@ -1089,7 +1124,7 @@ impl Sidebar {
                         }
                     }
 
-                    current_session_ids.insert(session_id.clone());
+                    thread_indices.insert(thread.session_info.session_id.clone(), entries.len());
                     entries.push(thread.into());
                 }
 
@@ -1107,10 +1142,11 @@ impl Sidebar {
 
         // Prune stale notifications using the session IDs we collected during
         // the build pass (no extra scan needed).
-        notified_threads.retain(|id| current_session_ids.contains(id));
+        notified_threads.retain(|id| thread_indices.contains_key(id));
 
         self.contents = SidebarContents {
             entries,
+            thread_indices,
             notified_threads,
             project_header_indices,
             has_open_projects,
@@ -1928,21 +1964,17 @@ impl Sidebar {
                 self.toggle_collapse(&path_list, window, cx);
             }
             ListEntry::Thread(thread) => {
+                let agent = thread.agent.clone();
                 let session_info = thread.session_info.clone();
-                match &thread.workspace {
-                    ThreadEntryWorkspace::Open(workspace) => {
-                        let workspace = workspace.clone();
-                        self.activate_thread(
-                            thread.agent.clone(),
-                            session_info,
-                            &workspace,
-                            window,
-                            cx,
-                        );
+                let workspace = thread.workspace.clone();
+                match &workspace {
+                    ThreadEntryWorkspace::Main(ws)
+                    | ThreadEntryWorkspace::LinkedOpen { worktree: ws, .. } => {
+                        self.activate_thread(agent, session_info, ws, window, cx);
                     }
-                    ThreadEntryWorkspace::Closed(path_list) => {
+                    ThreadEntryWorkspace::LinkedClosed { path_list, .. } => {
                         self.open_workspace_and_activate_thread(
-                            thread.agent.clone(),
+                            agent,
                             session_info,
                             path_list.clone(),
                             window,
@@ -2361,78 +2393,29 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // If we're archiving the currently focused thread, move focus to the
-        // nearest thread within the same project group. We never cross group
-        // boundaries — if the group has no other threads, clear focus and open
-        // a blank new thread in the panel instead.
+        let Some((pos, current_thread)) = self.contents.thread_entry(session_id) else {
+            return;
+        };
+        let current_workspace = current_thread.workspace.clone();
+
+        // Move focus to the nearest adjacent thread, or open a new draft.
         if self.active_entry.as_ref() == Some(&ActiveEntry::Thread(session_id.clone())) {
-            let current_pos = self.contents.entries.iter().position(|entry| {
-                matches!(entry, ListEntry::Thread(t) if &t.session_info.session_id == session_id)
+            let below = self.contents.entries.get(pos + 1).and_then(|e| match e {
+                ListEntry::Thread(t) => Some(t),
+                _ => None,
             });
-
-            // Find the workspace that owns this thread's project group by
-            // walking backwards to the nearest ProjectHeader. We must use
-            // *this* workspace (not the active workspace) because the user
-            // might be archiving a thread in a non-active group.
-            let group_workspace = current_pos.and_then(|pos| {
-                self.contents.entries[..pos]
-                    .iter()
-                    .rev()
-                    .find_map(|e| match e {
-                        ListEntry::ProjectHeader { workspace, .. } => Some(workspace.clone()),
-                        _ => None,
-                    })
-            });
-
-            let next_thread = current_pos.and_then(|pos| {
-                let group_start = self.contents.entries[..pos]
-                    .iter()
-                    .rposition(|e| matches!(e, ListEntry::ProjectHeader { .. }))
-                    .map_or(0, |i| i + 1);
-                let group_end = self.contents.entries[pos + 1..]
-                    .iter()
-                    .position(|e| matches!(e, ListEntry::ProjectHeader { .. }))
-                    .map_or(self.contents.entries.len(), |i| pos + 1 + i);
-
-                let above = self.contents.entries[group_start..pos]
-                    .iter()
-                    .rev()
-                    .find_map(|entry| {
-                        if let ListEntry::Thread(t) = entry {
-                            Some(t)
-                        } else {
-                            None
-                        }
-                    });
-
-                above.or_else(|| {
-                    self.contents.entries[pos + 1..group_end]
-                        .iter()
-                        .find_map(|entry| {
-                            if let ListEntry::Thread(t) = entry {
-                                Some(t)
-                            } else {
-                                None
-                            }
-                        })
-                })
-            });
+            let above = pos
+                .checked_sub(1)
+                .and_then(|i| match &self.contents.entries[i] {
+                    ListEntry::Thread(t) => Some(t),
+                    _ => None,
+                });
+            let next_thread = below.or(above);
 
             if let Some(next) = next_thread {
-                self.active_entry =
-                    Some(ActiveEntry::Thread(next.session_info.session_id.clone()));
+                self.active_entry = Some(ActiveEntry::Thread(next.session_info.session_id.clone()));
 
-                // Use the thread's own workspace when it has one open (e.g. an absorbed
-                // linked worktree thread that appears under the main workspace's header
-                // but belongs to its own workspace). Loading into the wrong panel binds
-                // the thread to the wrong project, which corrupts its stored folder_paths
-                // when metadata is saved via ThreadMetadata::from_thread.
-                let target_workspace = match &next.workspace {
-                    ThreadEntryWorkspace::Open(ws) => Some(ws.clone()),
-                    ThreadEntryWorkspace::Closed(_) => group_workspace,
-                };
-
-                if let Some(workspace) = target_workspace {
+                if let Some(workspace) = next.workspace.workspace() {
                     if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
                         agent_panel.update(cx, |panel, cx| {
                             panel.load_agent_thread(
@@ -2449,19 +2432,37 @@ impl Sidebar {
                 }
             } else {
                 self.active_entry = None;
-                if let Some(workspace) = &group_workspace {
-                    if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
-                        agent_panel.update(cx, |panel, cx| {
-                            panel.new_thread(&NewThread, window, cx);
-                        });
-                    }
+                let parent = current_workspace.parent_workspace();
+                if let Some(agent_panel) = parent.read(cx).panel::<AgentPanel>(cx) {
+                    agent_panel.update(cx, |panel, cx| {
+                        panel.new_thread(&NewThread, window, cx);
+                    });
                 }
             }
         }
 
-        SidebarThreadMetadataStore::global(cx)
-            .update(cx, |store, cx| store.delete(session_id.clone(), cx))
-            .detach_and_log_err(cx);
+        // Delete from the store and clean up empty worktree workspaces.
+        let delete_task = SidebarThreadMetadataStore::global(cx)
+            .update(cx, |store, cx| store.delete(session_id, cx));
+
+        cx.spawn_in(window, async move |this, cx| {
+            delete_task.await?;
+            if current_workspace.is_open_worktree() {
+                if let Some(ws) = current_workspace.workspace() {
+                    this.update_in(cx, |sidebar, window, cx| {
+                        let path_list = workspace_path_list(ws, cx);
+                        let has_remaining = SidebarThreadMetadataStore::global(cx)
+                            .read(cx)
+                            .has_entries_for_path(&path_list);
+                        if !has_remaining {
+                            sidebar.remove_workspace(ws, window, cx);
+                        }
+                    })?;
+                }
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn remove_selected_thread(
@@ -2601,16 +2602,17 @@ impl Sidebar {
                 cx.listener(move |this, _, window, cx| {
                     this.selection = None;
                     match &thread_workspace {
-                        ThreadEntryWorkspace::Open(workspace) => {
+                        ThreadEntryWorkspace::Main(ws)
+                        | ThreadEntryWorkspace::LinkedOpen { worktree: ws, .. } => {
                             this.activate_thread(
                                 agent.clone(),
                                 session_info.clone(),
-                                workspace,
+                                ws,
                                 window,
                                 cx,
                             );
                         }
-                        ThreadEntryWorkspace::Closed(path_list) => {
+                        ThreadEntryWorkspace::LinkedClosed { path_list, .. } => {
                             this.open_workspace_and_activate_thread(
                                 agent.clone(),
                                 session_info.clone(),
@@ -3860,7 +3862,7 @@ mod tests {
                     icon: IconName::ZedAgent,
                     icon_from_external_svg: None,
                     status: AgentThreadStatus::Completed,
-                    workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                    workspace: ThreadEntryWorkspace::Main(workspace.clone()),
                     is_live: false,
                     is_background: false,
                     is_title_generating: false,
@@ -3884,7 +3886,7 @@ mod tests {
                     icon: IconName::ZedAgent,
                     icon_from_external_svg: None,
                     status: AgentThreadStatus::Running,
-                    workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                    workspace: ThreadEntryWorkspace::Main(workspace.clone()),
                     is_live: true,
                     is_background: false,
                     is_title_generating: false,
@@ -3908,7 +3910,7 @@ mod tests {
                     icon: IconName::ZedAgent,
                     icon_from_external_svg: None,
                     status: AgentThreadStatus::Error,
-                    workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                    workspace: ThreadEntryWorkspace::Main(workspace.clone()),
                     is_live: true,
                     is_background: false,
                     is_title_generating: false,
@@ -3932,7 +3934,7 @@ mod tests {
                     icon: IconName::ZedAgent,
                     icon_from_external_svg: None,
                     status: AgentThreadStatus::WaitingForConfirmation,
-                    workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                    workspace: ThreadEntryWorkspace::Main(workspace.clone()),
                     is_live: false,
                     is_background: false,
                     is_title_generating: false,
@@ -3956,7 +3958,7 @@ mod tests {
                     icon: IconName::ZedAgent,
                     icon_from_external_svg: None,
                     status: AgentThreadStatus::Completed,
-                    workspace: ThreadEntryWorkspace::Open(workspace.clone()),
+                    workspace: ThreadEntryWorkspace::Main(workspace.clone()),
                     is_live: true,
                     is_background: true,
                     is_title_generating: false,
@@ -7146,6 +7148,113 @@ mod tests {
             entries_after.iter().any(|s| s.contains("{wt-feature-a}")),
             "T1 should still carry its linked-worktree chip after archiving T2: {:?}",
             entries_after
+        );
+    }
+
+    #[gpui::test]
+    async fn test_archive_last_worktree_thread_removes_workspace(cx: &mut TestAppContext) {
+        agent_ui::test_support::init_test(cx);
+        cx.update(|cx| {
+            cx.update_flags(false, vec!["agent-v2".into()]);
+            ThreadStore::init_global(cx);
+            SidebarThreadMetadataStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            prompt_store::init(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/project",
+            serde_json::json!({
+                ".git": {
+                    "worktrees": {
+                        "feature-a": {
+                            "commondir": "../../",
+                            "HEAD": "ref: refs/heads/feature-a",
+                        },
+                    },
+                },
+                "src": {},
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            "/wt-feature-a",
+            serde_json::json!({
+                ".git": "gitdir: /project/.git/worktrees/feature-a",
+                "src": {},
+            }),
+        )
+        .await;
+        fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
+            state.worktrees.push(git::repository::Worktree {
+                path: std::path::PathBuf::from("/wt-feature-a"),
+                ref_name: Some("refs/heads/feature-a".into()),
+                sha: "aaa".into(),
+            });
+        })
+        .unwrap();
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+
+        let main_project = project::Project::test(fs.clone(), ["/project".as_ref()], cx).await;
+        let worktree_project =
+            project::Project::test(fs.clone(), ["/wt-feature-a".as_ref()], cx).await;
+        main_project
+            .update(cx, |p, cx| p.git_scans_complete(cx))
+            .await;
+        worktree_project
+            .update(cx, |p, cx| p.git_scans_complete(cx))
+            .await;
+
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            MultiWorkspace::test_new(main_project.clone(), window, cx)
+        });
+        let worktree_workspace = multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.test_add_workspace(worktree_project.clone(), window, cx)
+        });
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.activate_index(0, window, cx);
+        });
+
+        let sidebar = setup_sidebar(&multi_workspace, cx);
+        let main_workspace = multi_workspace.read_with(cx, |mw, _| mw.workspaces()[0].clone());
+        let _main_panel = add_agent_panel(&main_workspace, &main_project, cx);
+        let _worktree_panel = add_agent_panel(&worktree_workspace, &worktree_project, cx);
+
+        // Save a single thread for the worktree.
+        let thread_id = acp::SessionId::new(Arc::from("wt-thread"));
+        save_thread_metadata(
+            thread_id.clone(),
+            "Worktree Thread".into(),
+            chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+            PathList::new(&[std::path::PathBuf::from("/wt-feature-a")]),
+            cx,
+        )
+        .await;
+        cx.run_until_parked();
+
+        assert_eq!(
+            multi_workspace.read_with(cx, |mw, _| mw.workspaces().len()),
+            2,
+            "should have main + worktree workspaces"
+        );
+
+        // Archive the only worktree thread.
+        sidebar.update_in(cx, |sidebar, _window, cx| {
+            sidebar.active_entry = Some(ActiveEntry::Thread(thread_id.clone()));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.archive_thread(&thread_id, window, cx);
+        });
+        cx.run_until_parked();
+
+        // The worktree workspace should have been removed.
+        assert_eq!(
+            multi_workspace.read_with(cx, |mw, _| mw.workspaces().len()),
+            1,
+            "worktree workspace should be removed after archiving its last thread"
         );
     }
 }

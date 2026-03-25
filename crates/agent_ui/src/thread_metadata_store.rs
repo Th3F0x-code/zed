@@ -228,6 +228,12 @@ impl SidebarThreadMetadataStore {
         self.threads.iter().map(|thread| thread.session_id.clone())
     }
 
+    pub fn has_entries_for_path(&self, path_list: &PathList) -> bool {
+        self.threads_by_paths
+            .get(path_list)
+            .is_some_and(|entries| !entries.is_empty())
+    }
+
     pub fn entries_for_path(
         &self,
         path_list: &PathList,
@@ -408,12 +414,13 @@ impl ThreadMetadataDb {
             .map(|counts| counts.into_iter().next().unwrap_or_default() == 0)
     }
 
-    /// List all sidebar thread metadata, ordered by updated_at descending.
+    /// Returns all thread metadata, sorted by most recently created first.
+    /// When `created_at` is NULL, falls back to `updated_at`.
     pub fn list(&self) -> anyhow::Result<Vec<ThreadMetadata>> {
         self.select::<ThreadMetadata>(
             "SELECT session_id, agent_id, title, updated_at, created_at, folder_paths, folder_paths_order \
              FROM sidebar_threads \
-             ORDER BY updated_at DESC"
+             ORDER BY COALESCE(created_at, updated_at) DESC"
         )?()
     }
 
