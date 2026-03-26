@@ -287,6 +287,7 @@ impl Sidebar {
                     this.update_entries(cx);
                 }
                 MultiWorkspaceEvent::WorkspaceRemoved(_) => {
+                    this.prune_stale_worktree_workspaces(window, cx);
                     this.update_entries(cx);
                 }
             },
@@ -1651,6 +1652,16 @@ impl Sidebar {
             if should_prune {
                 to_remove.push(workspace.clone());
             }
+        }
+
+        if to_remove.is_empty() {
+            return;
+        }
+
+        if to_remove.len() == workspaces.len() {
+            multi_workspace.update(cx, |multi_workspace, cx| {
+                multi_workspace.create_empty_workspace(window, cx).detach();
+            });
         }
 
         for workspace in &to_remove {
@@ -6623,6 +6634,129 @@ mod tests {
                 .unwrap(),
             1,
             "other windows should not be activated just because they also match the saved paths"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_removing_workspace_also_removes_absorbed_worktrees(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        // Main repo with two linked worktrees.
+        fs.insert_tree(
+            "/project",
+            serde_json::json!({
+                ".git": {
+                    "worktrees": {
+                        "feature-a": {
+                            "commondir": "../../",
+                            "HEAD": "ref: refs/heads/feature-a",
+                        },
+                        "feature-b": {
+                            "commondir": "../../",
+                            "HEAD": "ref: refs/heads/feature-b",
+                        },
+                    },
+                },
+                "src": {},
+            }),
+        )
+        .await;
+
+        // Two worktree checkouts whose .git files point back to the main repo.
+        fs.insert_tree(
+            "/wt-feature-a",
+            serde_json::json!({
+                ".git": "gitdir: /project/.git/worktrees/feature-a",
+                "src": {},
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            "/wt-feature-b",
+            serde_json::json!({
+                ".git": "gitdir: /project/.git/worktrees/feature-b",
+                "src": {},
+            }),
+        )
+        .await;
+
+        // Configure the main repo to list both worktrees.
+        fs.with_git_state(std::path::Path::new("/project/.git"), false, |state| {
+            state.worktrees.push(git::repository::Worktree {
+                path: std::path::PathBuf::from("/wt-feature-a"),
+                ref_name: Some("refs/heads/feature-a".into()),
+                sha: "aaa".into(),
+            });
+            state.worktrees.push(git::repository::Worktree {
+                path: std::path::PathBuf::from("/wt-feature-b"),
+                ref_name: Some("refs/heads/feature-b".into()),
+                sha: "bbb".into(),
+            });
+        })
+        .unwrap();
+
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+
+        let main_project = project::Project::test(fs.clone(), ["/project".as_ref()], cx).await;
+        let worktree_project_a =
+            project::Project::test(fs.clone(), ["/wt-feature-a".as_ref()], cx).await;
+        let worktree_project_b =
+            project::Project::test(fs.clone(), ["/wt-feature-b".as_ref()], cx).await;
+
+        main_project
+            .update(cx, |p, cx| p.git_scans_complete(cx))
+            .await;
+        worktree_project_a
+            .update(cx, |p, cx| p.git_scans_complete(cx))
+            .await;
+        worktree_project_b
+            .update(cx, |p, cx| p.git_scans_complete(cx))
+            .await;
+
+        // Open the main project first, then add both worktree workspaces.
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            MultiWorkspace::test_new(main_project.clone(), window, cx)
+        });
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.test_add_workspace(worktree_project_a.clone(), window, cx);
+        });
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.test_add_workspace(worktree_project_b.clone(), window, cx);
+        });
+        let sidebar = setup_sidebar(&multi_workspace, cx);
+
+        // Save threads for both worktrees so they appear in the sidebar.
+        let paths_a = PathList::new(&[std::path::PathBuf::from("/wt-feature-a")]);
+        let paths_b = PathList::new(&[std::path::PathBuf::from("/wt-feature-b")]);
+        save_named_thread_metadata("thread-a", "Thread A", &paths_a, cx).await;
+        save_named_thread_metadata("thread-b", "Thread B", &paths_b, cx).await;
+
+        multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
+        cx.run_until_parked();
+
+        // Both worktree threads should be absorbed under the main project header.
+        assert_eq!(
+            visible_entries_as_strings(&sidebar, cx),
+            vec![
+                "v [project]",
+                "  Thread A {wt-feature-a}",
+                "  Thread B {wt-feature-b}",
+            ]
+        );
+
+        // Now remove the main workspace (index 0).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.remove_workspace(0, window, cx);
+        });
+        cx.run_until_parked();
+
+        // The worktree workspaces should also have been removed.
+        // Before the fix, they remain in the sidebar as standalone entries.
+        assert_eq!(
+            visible_entries_as_strings(&sidebar, cx),
+            Vec::<String>::new(),
+            "removing the main workspace should also remove the absorbed worktree workspaces"
         );
     }
 }

@@ -5,9 +5,7 @@ use gpui::{
     ManagedView, MouseButton, Pixels, Render, Subscription, Task, Tiling, Window, WindowId,
     actions, deferred, px,
 };
-use project::DisableAiSettings;
-#[cfg(any(test, feature = "test-support"))]
-use project::Project;
+use project::{DisableAiSettings, Project};
 use settings::Settings;
 use std::future::Future;
 use std::path::PathBuf;
@@ -590,8 +588,7 @@ impl MultiWorkspace {
         workspace
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn create_test_workspace(
+    pub fn create_empty_workspace(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -634,6 +631,15 @@ impl MultiWorkspace {
                 .unwrap();
             task.await
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_test_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        self.create_empty_workspace(window, cx)
     }
 
     pub fn remove_workspace(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
