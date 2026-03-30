@@ -46,7 +46,10 @@ use workspace::{
 use zed_actions::OpenRecent;
 use zed_actions::editor::{MoveDown, MoveUp};
 
-use zed_actions::agents_sidebar::{FocusSidebarFilter, ToggleThreadSwitcher};
+use zed_actions::agents_sidebar::{
+    ActivateSelectedWorkspace, FocusSidebarFilter, RemoveSelected, RemoveSelectedWorkspace,
+    ShowFewerThreads, ShowMoreThreads, StopSelectedThread, ToggleThreadSwitcher,
+};
 
 use crate::thread_switcher::{ThreadSwitcher, ThreadSwitcherEntry, ThreadSwitcherEvent};
 
@@ -2413,7 +2416,17 @@ impl Sidebar {
             return;
         };
         let workspace = workspace.clone();
-        self.remove_workspace(&workspace, window, cx);
+        if let Some(multi_workspace) = self.multi_workspace.upgrade() {
+            multi_workspace.update(cx, |multi_workspace, cx| {
+                if let Some(index) = multi_workspace
+                    .workspaces()
+                    .iter()
+                    .position(|w| *w == workspace)
+                {
+                    multi_workspace.remove_workspace(index, window, cx);
+                }
+            });
+        }
     }
 
     fn remove_selected(&mut self, _: &RemoveSelected, window: &mut Window, cx: &mut Context<Self>) {
