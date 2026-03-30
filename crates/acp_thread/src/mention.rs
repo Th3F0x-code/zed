@@ -507,6 +507,15 @@ mod tests {
     }
 
     #[test]
+    fn test_directory_uri_inserts_trailing_slash() {
+        let uri = MentionUri::Directory {
+            abs_path: PathBuf::from(path!("/path/to/dir")),
+        };
+        let expected = uri!("file:///path/to/dir/");
+        assert_eq!(uri.to_uri().to_string(), expected);
+    }
+
+    #[test]
     fn test_to_directory_uri_without_slash() {
         let uri = MentionUri::Directory {
             abs_path: PathBuf::from(path!("/path/to/dir/")),
