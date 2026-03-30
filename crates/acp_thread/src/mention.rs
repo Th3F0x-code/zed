@@ -337,7 +337,11 @@ impl MentionUri {
             MentionUri::PastedImage => Url::parse("zed:///agent/pasted-image").unwrap(),
             MentionUri::Directory { abs_path } => {
                 let mut url = Url::parse("file:///").unwrap();
-                url.set_path(&abs_path.to_string_lossy());
+                let mut path_str = abs_path.to_string_lossy().into_owned();
+                if !path_str.ends_with('/') {
+                    path_str.push('/');
+                }
+                url.set_path(&path_str);
                 url
             }
             MentionUri::Symbol {
