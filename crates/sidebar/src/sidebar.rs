@@ -412,7 +412,7 @@ impl Sidebar {
                     this.subscribe_to_workspace(workspace, window, cx);
                     this.update_entries(cx);
                 }
-                MultiWorkspaceEvent::WorkspaceRemoved(_) => {
+                MultiWorkspaceEvent::WorkspaceRemoved => {
                     this.update_entries(cx);
                 }
             },
@@ -1592,7 +1592,7 @@ impl Sidebar {
                                 if let Some(mw) = multi_workspace_for_worktree.upgrade() {
                                     let ws = workspace_for_remove_worktree.clone();
                                     mw.update(cx, |multi_workspace, cx| {
-                                        multi_workspace.remove(&ws, window, cx);
+                                        multi_workspace.remove_group(&ws, window, cx);
                                     });
                                 }
                             } else {
@@ -1665,7 +1665,7 @@ impl Sidebar {
                             if let Some(mw) = multi_workspace_for_remove.upgrade() {
                                 let ws = workspace_for_remove.clone();
                                 mw.update(cx, |multi_workspace, cx| {
-                                    multi_workspace.remove(&ws, window, cx);
+                                    multi_workspace.remove_group(&ws, window, cx);
                                 });
                             }
                         })
