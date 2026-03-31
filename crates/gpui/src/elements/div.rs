@@ -38,7 +38,7 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     mem,
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::Arc,
     time::Duration,
 };
@@ -2878,7 +2878,7 @@ pub struct InteractiveElementState {
     pub(crate) hover_listener_state: Option<Rc<RefCell<bool>>>,
     pub(crate) pending_mouse_down: Option<Rc<RefCell<Option<MouseDownEvent>>>>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
-    pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
+    pub(crate) active_tooltip: Option<ActiveTooltipState>,
 }
 
 /// Whether or not the element or a group that contains it is clicked by the mouse.
@@ -2907,6 +2907,9 @@ pub struct ElementHoverState {
     pub element: bool,
 }
 
+type ActiveTooltipState = Rc<RefCell<Option<ActiveTooltip>>>;
+type WeakActiveTooltipState = Weak<RefCell<Option<ActiveTooltip>>>;
+
 pub(crate) enum ActiveTooltip {
     /// Currently delaying before showing the tooltip.
     WaitingForShow { _task: Task<()> },
@@ -2923,10 +2926,7 @@ pub(crate) enum ActiveTooltip {
     },
 }
 
-pub(crate) fn clear_active_tooltip(
-    active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
-    window: &mut Window,
-) {
+pub(crate) fn clear_active_tooltip(active_tooltip: &ActiveTooltipState, window: &mut Window) {
     match active_tooltip.borrow_mut().take() {
         None => {}
         Some(ActiveTooltip::WaitingForShow { .. }) => {}
@@ -2936,7 +2936,7 @@ pub(crate) fn clear_active_tooltip(
 }
 
 pub(crate) fn clear_active_tooltip_if_not_hoverable(
-    active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+    active_tooltip: &ActiveTooltipState,
     window: &mut Window,
 ) {
     let should_clear = match active_tooltip.borrow().as_ref() {
@@ -2952,7 +2952,7 @@ pub(crate) fn clear_active_tooltip_if_not_hoverable(
 }
 
 pub(crate) fn set_tooltip_on_window(
-    active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+    active_tooltip: &ActiveTooltipState,
     window: &mut Window,
 ) -> Option<TooltipId> {
     let tooltip = match active_tooltip.borrow().as_ref() {
@@ -2965,7 +2965,7 @@ pub(crate) fn set_tooltip_on_window(
 }
 
 pub(crate) fn register_tooltip_mouse_handlers(
-    active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+    active_tooltip: &ActiveTooltipState,
     tooltip_id: Option<TooltipId>,
     build_tooltip: Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>>,
     check_is_hovered: Rc<dyn Fn(&Window) -> bool>,
@@ -3020,7 +3020,7 @@ pub(crate) fn register_tooltip_mouse_handlers(
 /// does not know if the hitbox is occluded. In the case where a tooltip gets displayed and then
 /// gets occluded after display, it will stick around until the mouse exits the hover bounds.
 fn handle_tooltip_mouse_move(
-    active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+    active_tooltip: &ActiveTooltipState,
     build_tooltip: &Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>>,
     check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
     check_is_hovered_during_prepaint: &Rc<dyn Fn(&Window) -> bool>,
@@ -3067,21 +3067,29 @@ fn handle_tooltip_mouse_move(
         }
         Action::ScheduleShow => {
             let delayed_show_task = window.spawn(cx, {
-                let active_tooltip = active_tooltip.clone();
+                let weak_active_tooltip = Rc::downgrade(active_tooltip);
                 let build_tooltip = build_tooltip.clone();
                 let check_is_hovered_during_prepaint = check_is_hovered_during_prepaint.clone();
                 async move |cx| {
                     cx.background_executor().timer(TOOLTIP_SHOW_DELAY).await;
+                    let Some(active_tooltip) = weak_active_tooltip.upgrade() else {
+                        return;
+                    };
                     cx.update(|window, cx| {
                         let new_tooltip =
                             build_tooltip(window, cx).map(|(view, tooltip_is_hoverable)| {
-                                let active_tooltip = active_tooltip.clone();
+                                let weak_active_tooltip = Rc::downgrade(&active_tooltip);
                                 ActiveTooltip::Visible {
                                     tooltip: AnyTooltip {
                                         view,
                                         mouse_position: window.mouse_position(),
                                         check_visible_and_update: Rc::new(
                                             move |tooltip_bounds, window, cx| {
+                                                let Some(active_tooltip) =
+                                                    weak_active_tooltip.upgrade()
+                                                else {
+                                                    return false;
+                                                };
                                                 handle_tooltip_check_visible_and_update(
                                                     &active_tooltip,
                                                     tooltip_is_hoverable,
@@ -3115,7 +3123,7 @@ fn handle_tooltip_mouse_move(
 /// purpose of doing this logic here instead of the mouse move handler is that the mouse move
 /// handler won't get called when the element is not painted (e.g. via use of `visible_on_hover`).
 fn handle_tooltip_check_visible_and_update(
-    active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+    active_tooltip: &ActiveTooltipState,
     tooltip_is_hoverable: bool,
     check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
     tooltip_bounds: Bounds<Pixels>,
@@ -3160,11 +3168,14 @@ fn handle_tooltip_check_visible_and_update(
         Action::Hide => clear_active_tooltip(active_tooltip, window),
         Action::ScheduleHide(tooltip) => {
             let delayed_hide_task = window.spawn(cx, {
-                let active_tooltip = active_tooltip.clone();
+                let weak_active_tooltip: WeakActiveTooltipState = Rc::downgrade(active_tooltip);
                 async move |cx| {
                     cx.background_executor()
                         .timer(HOVERABLE_TOOLTIP_HIDE_DELAY)
                         .await;
+                    let Some(active_tooltip) = weak_active_tooltip.upgrade() else {
+                        return;
+                    };
                     if active_tooltip.borrow_mut().take().is_some() {
                         cx.update(|window, _cx| window.refresh()).ok();
                     }
