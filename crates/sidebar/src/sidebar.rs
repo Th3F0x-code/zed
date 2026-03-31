@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use settings::Settings as _;
 use std::collections::{HashMap, HashSet};
 use std::mem;
+use std::path::PathBuf;
 use std::rc::Rc;
 use theme::ActiveTheme;
 use ui::{
@@ -2169,15 +2170,15 @@ impl Sidebar {
         ThreadMetadataStore::global(cx)
             .update(cx, |store, cx| store.unarchive(&metadata.session_id, cx));
 
-        // For single-path threads (potential linked worktrees), check if we
-        // need to restore an archived worktree before opening the workspace.
-        if metadata.folder_paths.paths().len() == 1 {
-            let worktree_path = metadata.folder_paths.paths()[0].clone();
-            self.maybe_restore_git_worktree(worktree_path, metadata, window, cx);
+        if metadata.folder_paths.paths().is_empty() {
+            self.activate_unarchived_thread_in_workspace(&metadata, window, cx);
             return;
         }
 
-        self.activate_unarchived_thread_in_workspace(&metadata, window, cx);
+        // Check all paths for archived worktrees that may need restoration
+        // before opening the workspace.
+        let paths = metadata.folder_paths.paths().to_vec();
+        self.maybe_restore_git_worktrees(paths, metadata, window, cx);
     }
 
     fn activate_unarchived_thread_in_workspace(
@@ -2217,9 +2218,9 @@ impl Sidebar {
         }
     }
 
-    fn maybe_restore_git_worktree(
+    fn maybe_restore_git_worktrees(
         &mut self,
-        worktree_path: std::path::PathBuf,
+        paths: Vec<std::path::PathBuf>,
         metadata: ThreadMetadata,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2228,32 +2229,48 @@ impl Sidebar {
             return;
         };
         let workspaces = multi_workspace.read(cx).workspaces().to_vec();
-        let worktree_path_str = worktree_path.to_string_lossy().to_string();
 
         cx.spawn_in(window, async move |this, cx| {
             let store = cx.update(|_window, cx| ThreadMetadataStore::global(cx))?;
+            let mut final_paths = Vec::with_capacity(paths.len());
 
-            let archived_worktree = store
-                .update(cx, |store, cx| {
-                    store.get_archived_worktree_by_path(worktree_path_str, cx)
-                })
-                .await?;
+            for path in &paths {
+                let path_str = path.to_string_lossy().to_string();
+                let archived_worktree = store
+                    .update(cx, |store, cx| {
+                        store.get_archived_worktree_by_path(path_str, cx)
+                    })
+                    .await?;
 
-            match archived_worktree {
-                None => {
-                    // No archived worktree record — just open normally.
-                    this.update_in(cx, |this, window, cx| {
-                        this.activate_unarchived_thread_in_workspace(&metadata, window, cx);
-                    })?;
-                }
-                Some(row) => {
-                    // Full restore from WIP commit.
-                    Self::restore_archived_worktree(&row, &workspaces, metadata, &this, cx).await?;
+                match archived_worktree {
+                    None => {
+                        // No archived worktree record — keep the original path.
+                        final_paths.push(path.clone());
+                    }
+                    Some(row) if row.commit_hash.is_empty() => {
+                        // Worktree was deleted without a WIP commit (user
+                        // chose "Delete Anyway"). Redirect to main repo.
+                        final_paths.push(row.main_repo_path.clone());
+                        Self::maybe_cleanup_archived_worktree(&row, &store, &workspaces, cx).await;
+                    }
+                    Some(row) => {
+                        // Full restore from WIP commit.
+                        let restored_path =
+                            Self::restore_archived_worktree(&row, &workspaces, cx).await?;
+                        final_paths.push(restored_path);
 
-                    // Clean up the archived worktree record and ref after restore.
-                    Self::maybe_cleanup_archived_worktree(&row, &store, &workspaces, cx).await;
+                        // Clean up the archived worktree record and ref.
+                        Self::maybe_cleanup_archived_worktree(&row, &store, &workspaces, cx).await;
+                    }
                 }
             }
+
+            let mut updated_metadata = metadata;
+            updated_metadata.folder_paths = PathList::new(&final_paths);
+
+            this.update_in(cx, |this, window, cx| {
+                this.activate_unarchived_thread_in_workspace(&updated_metadata, window, cx);
+            })?;
 
             anyhow::Ok(())
         })
@@ -2263,10 +2280,8 @@ impl Sidebar {
     async fn restore_archived_worktree(
         row: &ArchivedGitWorktree,
         workspaces: &[Entity<Workspace>],
-        metadata: ThreadMetadata,
-        this: &WeakEntity<Self>,
         cx: &mut AsyncWindowContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PathBuf> {
         let commit_hash = row.commit_hash.clone();
 
         // Find the main repo entity.
@@ -2288,8 +2303,7 @@ impl Sidebar {
 
         let Some(main_repo) = main_repo else {
             // Main repo not found — fall back to fresh worktree.
-            Self::create_fresh_worktree_and_open(row, workspaces, metadata, this, cx).await?;
-            return Ok(());
+            return Self::create_fresh_worktree(row, workspaces, cx).await;
         };
 
         // Check if the original worktree path is already in use.
@@ -2333,9 +2347,7 @@ impl Sidebar {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
                     log::error!("Failed to create worktree: {err}");
-                    Self::create_fresh_worktree_and_open(row, workspaces, metadata, this, cx)
-                        .await?;
-                    return Ok(());
+                    return Self::create_fresh_worktree(row, workspaces, cx).await;
                 }
                 Err(_) => {
                     anyhow::bail!("Worktree creation was canceled");
@@ -2443,24 +2455,14 @@ impl Sidebar {
                 .await?;
         }
 
-        // Open workspace at the final path and load the thread.
-        let mut updated_metadata = metadata;
-        updated_metadata.folder_paths = PathList::new(&[final_worktree_path]);
-
-        this.update_in(cx, |this, window, cx| {
-            this.activate_unarchived_thread_in_workspace(&updated_metadata, window, cx);
-        })?;
-
-        Ok(())
+        Ok(final_worktree_path)
     }
 
-    async fn create_fresh_worktree_and_open(
+    async fn create_fresh_worktree(
         row: &ArchivedGitWorktree,
         workspaces: &[Entity<Workspace>],
-        metadata: ThreadMetadata,
-        this: &WeakEntity<Self>,
         cx: &mut AsyncWindowContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PathBuf> {
         // Find the main repo entity.
         let main_repo = cx.update(|_window, cx| {
             workspaces.iter().find_map(|workspace| {
@@ -2479,11 +2481,8 @@ impl Sidebar {
         })?;
 
         let Some(main_repo) = main_repo else {
-            // Can't find the main repo — just open the thread normally.
-            this.update_in(cx, |this, window, cx| {
-                this.activate_unarchived_thread_in_workspace(&metadata, window, cx);
-            })?;
-            return Ok(());
+            // Can't find the main repo — fall back to the original path.
+            return Ok(row.worktree_path.clone());
         };
 
         // Generate a new branch name for the fresh worktree.
@@ -2503,31 +2502,18 @@ impl Sidebar {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 log::error!("Failed to create fresh worktree: {err}");
-                this.update_in(cx, |this, window, cx| {
-                    this.activate_unarchived_thread_in_workspace(&metadata, window, cx);
-                })?;
-                return Ok(());
+                return Ok(row.worktree_path.clone());
             }
             Err(_) => {
                 anyhow::bail!("Fresh worktree creation was canceled");
             }
         }
 
-        // Open workspace and load thread at the new path.
-        let mut updated_metadata = metadata;
-        updated_metadata.folder_paths = PathList::new(&[worktree_path]);
-
-        this.update_in(cx, |this, window, cx| {
-            this.activate_unarchived_thread_in_workspace(&updated_metadata, window, cx);
-        })?;
-
-        // Show a warning toast.
-        // TODO: Show notification via workspace when it becomes available
         log::warn!(
             "Unable to restore the original git worktree. Created a fresh worktree instead."
         );
 
-        Ok(())
+        Ok(worktree_path)
     }
 
     async fn maybe_cleanup_archived_worktree(
