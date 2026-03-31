@@ -3644,8 +3644,15 @@ mod tests {
 
         let active_tooltip: Rc<RefCell<Option<ActiveTooltip>>> = Rc::new(RefCell::new(None));
         let weak_active_tooltip = Rc::downgrade(&active_tooltip);
+
+        let mut interactivity = Interactivity::default();
+        interactivity.tooltip(|_, cx| cx.new(|_| TestTooltipView).into());
+        let tooltip_builder = interactivity.tooltip_builder.take().unwrap();
+        let tooltip_is_hoverable = tooltip_builder.hoverable;
         let build_tooltip: Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>> =
-            Rc::new(|_, cx| Some((cx.new(|_| TestTooltipView).into(), false)));
+            Rc::new(move |window: &mut Window, cx: &mut App| {
+                Some(((tooltip_builder.build)(window, cx), tooltip_is_hoverable))
+            });
         let check_is_hovered: Rc<dyn Fn(&Window) -> bool> = Rc::new(|_: &Window| true);
         let check_is_hovered_during_prepaint: Rc<dyn Fn(&Window) -> bool> =
             Rc::new(|_: &Window| true);
