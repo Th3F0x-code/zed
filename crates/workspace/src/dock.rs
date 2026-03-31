@@ -1,5 +1,6 @@
+use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::persistence::model::DockData;
-use crate::{DraggedDock, Event, ModalLayer, Pane};
+use crate::{DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings};
 use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
 use client::proto;
@@ -12,7 +13,7 @@ use gpui::{
     px,
 };
 use serde::{Deserialize, Serialize};
-use settings::SettingsStore;
+use settings::{Settings, SettingsStore};
 use std::sync::Arc;
 use ui::{
     ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tooltip, prelude::*,
@@ -224,6 +225,7 @@ pub struct Dock {
     is_open: bool,
     active_panel_index: Option<usize>,
     focus_handle: FocusHandle,
+    focus_follows_mouse: FocusFollowsMouse,
     pub(crate) serialized_dock: Option<DockData>,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
@@ -329,6 +331,7 @@ impl Dock {
                 active_panel_index: None,
                 is_open: false,
                 focus_handle: focus_handle.clone(),
+                focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
                 _subscriptions: [focus_subscription, zoom_subscription],
                 serialized_dock: None,
                 zoom_layer_open: false,
@@ -1087,6 +1090,8 @@ impl Render for Dock {
                 })
                 .child(
                     div()
+                        .id("dock-panel")
+                        .focus_follows_mouse(self.focus_follows_mouse, cx)
                         .map(|this| match self.position().axis() {
                             Axis::Horizontal => this.min_w(size).h_full(),
                             Axis::Vertical => this.min_h(size).w_full(),
