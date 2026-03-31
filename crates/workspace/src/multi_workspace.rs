@@ -761,10 +761,9 @@ impl MultiWorkspace {
             cx,
         );
         let new_workspace = cx.new(|cx| Workspace::new(None, project, app_state, window, cx));
-        self.activate(new_workspace, window, cx);
+        self.activate(new_workspace.clone(), window, cx);
 
-        let workspace = self.workspace().clone();
-        let weak_workspace = workspace.downgrade();
+        let weak_workspace = new_workspace.downgrade();
         let db = crate::persistence::WorkspaceDb::global(cx);
         cx.spawn_in(window, async move |this, cx| {
             let workspace_id = db.next_id().await.unwrap();
