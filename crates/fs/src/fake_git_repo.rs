@@ -255,12 +255,8 @@ impl GitRepository for FakeGitRepository {
             }
 
             let target_index = state.commit_history.len() - pop_count;
-            state.commit_history.truncate(target_index + 1);
-            let snapshot = state
-                .commit_history
-                .last()
-                .expect("pop_count validated above")
-                .clone();
+            let snapshot = state.commit_history[target_index].clone();
+            state.commit_history.truncate(target_index);
 
             match mode {
                 ResetMode::Soft => {
