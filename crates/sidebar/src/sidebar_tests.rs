@@ -5034,6 +5034,13 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
     // project scan, reset, branch switch, DB cleanup.
     cx.run_until_parked();
 
+    // NOTE: The FakeGitRepository::create_worktree implementation does not
+    // create a `.git` gitfile inside the worktree directory, so the project
+    // scanner does not discover a Repository entity for the restored worktree.
+    // This means the two-reset staging-restoration logic (mixed reset HEAD~,
+    // then soft reset HEAD~) is not exercised by this test. An integration
+    // test with a real git repo would be needed to cover that path.
+
     // 1. The thread should no longer be archived.
     cx.update(|_, cx| {
         let store = ThreadMetadataStore::global(cx);
