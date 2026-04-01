@@ -2814,16 +2814,7 @@ impl Sidebar {
             }
         }
 
-        // Capture metadata before archiving in case we need to cancel.
-        let thread_metadata = self.contents.entries.iter().find_map(|entry| {
-            if let ListEntry::Thread(t) = entry {
-                if &t.metadata.session_id == session_id {
-                    return Some(t.metadata.clone());
-                }
-            }
-            None
-        });
-        self.maybe_delete_git_worktree_for_archived_thread(session_id, thread_metadata, window, cx);
+        self.maybe_delete_git_worktree_for_archived_thread(session_id, window, cx);
     }
 
     /// If the thread being archived is associated with a linked git worktree,
@@ -2833,7 +2824,6 @@ impl Sidebar {
     fn maybe_delete_git_worktree_for_archived_thread(
         &self,
         session_id: &acp::SessionId,
-        thread_metadata: Option<ThreadMetadata>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2899,6 +2889,7 @@ impl Sidebar {
         let fs = <dyn fs::Fs>::global(cx);
         let worktree_path_str = worktree_path.to_string_lossy().to_string();
         let main_repo_path_str = main_repo_path.to_string_lossy().to_string();
+        let session_id = session_id.clone();
 
         cx.spawn_in(window, async move |_this, cx| {
             if !is_last_thread {
@@ -2909,11 +2900,9 @@ impl Sidebar {
 
             // Helper: unarchive the thread so it reappears in the sidebar.
             let unarchive = |cx: &mut AsyncWindowContext| {
-                if let Some(metadata) = &thread_metadata {
-                    store.update(cx, |store, cx| {
-                        store.unarchive(&metadata.session_id, cx);
-                    });
-                }
+                store.update(cx, |store, cx| {
+                    store.unarchive(&session_id, cx);
+                });
             };
 
             // Helper: undo both WIP commits on the worktree.
