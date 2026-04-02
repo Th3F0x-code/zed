@@ -149,19 +149,37 @@ impl From<&ThreadMetadata> for acp_thread::AgentSessionInfo {
 
 /// Record of a git worktree that was archived (deleted from disk) when its last thread was archived.
 pub struct ArchivedGitWorktree {
-    /// Auto-incrementing primary key, used for the git ref name and join table.
+    /// Auto-incrementing primary key
     pub id: i64,
-    /// Absolute path where the worktree directory lived on disk before deletion.
+    /// Absolute path to the directory of the worktree before it was deleted.
+    /// Used when restoring, to put the recreated worktree back where it was.
+    /// (If that dir is already taken when restoring, we auto-generate a new dir.)
     pub worktree_path: PathBuf,
-    /// Absolute path of the main (non-linked) repository that owns this worktree.
+    /// Absolute path of the main repository ("main worktree") that owned this worktree.
+    /// Used when restoring, to reattach the recreated worktree to the correct main worktree.
+    /// (If that dir is missing, use worktree_path as the new main worktree.)
     pub main_repo_path: PathBuf,
     /// Branch that was checked out in the worktree at archive time. `None` if
-    /// the worktree was in detached HEAD state, which shouldn't normally happen
-    /// for user-created linked worktrees but is possible via the terminal.
+    /// the worktree was in detached HEAD state, which isn't supported in Zed, but
+    /// could happen if the user made a detached one outside of Zed.
+    /// If that branch is missing, we auto-generate an new branch name. If the branch already
+    /// exists, we see if it points to our commit_hash~2 (~2 because commit_hash points to
+    /// WIP commits we created to preserve uncommitted and staged files, respectively),
+    /// and the branch does already point to that commit, then we use the branch as-is. If it
+    /// already exists but it's pointing to a different commit, we auto-gen a new branch.
     pub branch_name: Option<String>,
-    /// SHA of the WIP commit that preserves the worktree's file state.
+    /// SHA of the WIP commit that we made in order to save the files that were uncommitted
+    /// and unstaged at the time of archiving. This commit can be empty. Its parent commit
+    /// will also be a WIP that we created during archiving, which contains the files that
+    /// were staged at the time of archiving. (It can also be empty.) After doing `git reset`
+    /// past both of these commits, we're back in the state we had before archiving, including
+    /// what was staged, what was unstaged, and what was committed.
     pub commit_hash: String,
-    /// Whether this worktree has been restored by a prior unarchive.
+    /// Whether this worktree has been restored by a prior unarchive. This is used when
+    /// unarchiving multiple threads, and tells us whether to treat worktree_path's presence
+    /// in the filesystem as a collision to be worked around (the directory was "taken" by
+    /// something else while we were archived), or as a source of truth we can reuse for an
+    /// unarchived thread instead of needing to create another directory.
     pub restored: bool,
 }
 
