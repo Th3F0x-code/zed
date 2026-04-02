@@ -170,3 +170,8 @@ async fn test_replace(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+async fn test_worktrees(cx: &mut TestAppContext) {
+    //
+}

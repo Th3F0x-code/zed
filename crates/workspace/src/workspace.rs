@@ -31,8 +31,9 @@ pub use crate::notifications::NotificationFrame;
 pub use dock::Panel;
 pub use multi_workspace::{
     CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MultiWorkspace,
-    MultiWorkspaceEvent, NextWorkspace, PreviousWorkspace, Sidebar, SidebarEvent, SidebarHandle,
-    SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar, sidebar_side_context_menu,
+    MultiWorkspaceEvent, NextWorkspace, PreviousWorkspace, ProjectGroupKey, Sidebar, SidebarEvent,
+    SidebarHandle, SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar,
+    sidebar_side_context_menu,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
@@ -6373,6 +6374,30 @@ impl Workspace {
             .visible_worktrees(cx)
             .map(|worktree| worktree.read(cx).abs_path())
             .collect::<Vec<_>>()
+    }
+
+    pub fn project_group_key(&self, cx: &App) -> ProjectGroupKey {
+        let project = self.project().read(cx);
+        let repositories = project.repositories(cx);
+        let paths = project
+            .visible_worktrees(cx)
+            .map(|worktree| {
+                let worktree = worktree.read(cx);
+                let main_worktree_path = repositories.values().find_map(|repo| {
+                    let repo = repo.read(cx);
+                    if repo.work_directory_abs_path == worktree.abs_path() {
+                        Some(repo.original_repo_abs_path.clone())
+                    } else {
+                        None
+                    }
+                });
+                main_worktree_path.unwrap_or_else(|| worktree.abs_path())
+            })
+            .collect::<Vec<_>>();
+        ProjectGroupKey {
+            host: project.remote_connection_options(cx),
+            main_worktree_paths: PathList::new(&paths),
+        }
     }
 
     fn remove_panes(&mut self, member: Member, window: &mut Window, cx: &mut Context<Workspace>) {

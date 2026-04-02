@@ -224,7 +224,6 @@ enum ListEntry {
     },
     NewThread {
         path_list: PathList,
-        workspace: Entity<Workspace>,
         worktrees: Vec<WorktreeInfo>,
     },
 }
@@ -239,7 +238,7 @@ impl ListEntry {
                 ThreadEntryWorkspace::Closed(_) => None,
             },
             ListEntry::ViewMore { .. } => None,
-            ListEntry::NewThread { workspace, .. } => Some(workspace.clone()),
+            ListEntry::NewThread { .. } => None,
         }
     }
 
@@ -767,7 +766,7 @@ impl Sidebar {
         // Use ProjectGroupBuilder to canonically group workspaces by their
         // main git repository. This replaces the manual absorbed-workspace
         // detection that was here before.
-        let project_groups = ProjectGroupBuilder::from_multiworkspace(mw, cx);
+        let mut project_groups = ProjectGroupBuilder::from_multiworkspace(mw, cx);
 
         let has_open_projects = workspaces
             .iter()
@@ -785,13 +784,18 @@ impl Sidebar {
             (icon, icon_from_external_svg)
         };
 
-        for (group_name, group) in project_groups.groups() {
-            let path_list = group_name.path_list().clone();
+        // Make sure all the groups the MultiWorkspace cares about are also present
+        for mw_groups in mw.project_group_keys(cx) {
+            project_groups.ensure_group(&mw_groups);
+        }
+
+        for (group_key, group) in project_groups.groups() {
+            let path_list = group_key.main_worktree_paths.clone();
             if path_list.paths().is_empty() {
                 continue;
             }
 
-            let label = group_name.display_name();
+            let label = group_key.display_name();
 
             let is_collapsed = self.collapsed_groups.contains(&path_list);
             let should_load_threads = !is_collapsed || !query.is_empty();
@@ -807,6 +811,7 @@ impl Sidebar {
                 .as_ref()
                 .filter(|_| is_active)
                 .unwrap_or_else(|| group.main_workspace(cx));
+            // TODO: if we don't have a main workspace, create one for the main worktrees.
 
             // Collect live thread infos from all workspaces in this group.
             let live_infos: Vec<_> = group
@@ -1044,7 +1049,6 @@ impl Sidebar {
                 for (workspace, worktrees) in &threadless_workspaces {
                     entries.push(ListEntry::NewThread {
                         path_list: path_list.clone(),
-                        workspace: workspace.clone(),
                         worktrees: worktrees.clone(),
                     });
                 }
@@ -1057,7 +1061,6 @@ impl Sidebar {
                     let worktrees = worktree_info_from_thread_paths(&ws_path_list, &project_groups);
                     entries.push(ListEntry::NewThread {
                         path_list: path_list.clone(),
-                        workspace: representative_workspace.clone(),
                         worktrees,
                     });
                 }
@@ -1218,17 +1221,8 @@ impl Sidebar {
             } => self.render_view_more(ix, path_list, *is_fully_expanded, is_selected, cx),
             ListEntry::NewThread {
                 path_list,
-                workspace,
                 worktrees,
-            } => self.render_new_thread(
-                ix,
-                path_list,
-                workspace,
-                is_active,
-                worktrees,
-                is_selected,
-                cx,
-            ),
+            } => self.render_new_thread(ix, path_list, is_active, worktrees, is_selected, cx),
         };
 
         if is_group_header_after_first {
@@ -3058,8 +3052,7 @@ impl Sidebar {
     fn render_new_thread(
         &self,
         ix: usize,
-        _path_list: &PathList,
-        workspace: &Entity<Workspace>,
+        path_list: &PathList,
         is_active: bool,
         worktrees: &[WorktreeInfo],
         is_selected: bool,
@@ -3072,7 +3065,6 @@ impl Sidebar {
             DEFAULT_THREAD_TITLE.into()
         };
 
-        let workspace = workspace.clone();
         let id = SharedString::from(format!("new-thread-btn-{}", ix));
 
         let thread_item = ThreadItem::new(id, label)
@@ -3093,7 +3085,7 @@ impl Sidebar {
             .when(!is_active, |this| {
                 this.on_click(cx.listener(move |this, _, window, cx| {
                     this.selection = None;
-                    this.create_new_thread(&workspace, window, cx);
+                    this.create_new_thread(&path_list, window, cx);
                 }))
             });
 

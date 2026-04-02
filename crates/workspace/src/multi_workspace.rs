@@ -8,13 +8,14 @@ use gpui::{
 use project::DisableAiSettings;
 #[cfg(any(test, feature = "test-support"))]
 use project::Project;
+use remote::RemoteConnectionOptions;
 use settings::Settings;
 pub use settings::SidebarSide;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use ui::prelude::*;
-use util::ResultExt;
+use util::{ResultExt, path_list::PathList};
 use zed_actions::agents_sidebar::{MoveWorkspaceToNewWindow, ToggleThreadSwitcher};
 
 use agent_settings::AgentSettings;
@@ -228,6 +229,28 @@ pub struct MultiWorkspace {
     pending_removal_tasks: Vec<Task<()>>,
     _serialize_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ProjectGroupKey {
+    pub host: Option<RemoteConnectionOptions>,
+    pub main_worktree_paths: PathList,
+}
+
+impl ProjectGroupKey {
+    pub fn display_name(&self) -> SharedString {
+        let mut names = Vec::with_capacity(self.main_worktree_paths.paths().len());
+        for abs_path in self.main_worktree_paths.paths() {
+            if let Some(name) = abs_path.file_name() {
+                names.push(name.to_string_lossy().to_string());
+            }
+        }
+        if names.is_empty() {
+            "Empty Workspace".into()
+        } else {
+            names.join(", ").into()
+        }
+    }
 }
 
 impl EventEmitter<MultiWorkspaceEvent> for MultiWorkspace {}
@@ -452,6 +475,15 @@ impl MultiWorkspace {
 
     pub fn workspaces(&self) -> &[Entity<Workspace>] {
         &self.workspaces
+    }
+
+    pub fn project_group_keys(&self, cx: &App) -> impl Iterator<Item = ProjectGroupKey> {
+        let mut keys = Vec::new();
+        for workspace in &self.workspaces {
+            let key = workspace.read(cx).project_group_key(cx);
+            keys.push(key);
+        }
+        keys.into_iter()
     }
 
     pub fn active_workspace_index(&self) -> usize {
