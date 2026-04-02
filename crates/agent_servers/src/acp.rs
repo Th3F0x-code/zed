@@ -203,6 +203,34 @@ pub async fn connect(
 
 const MINIMUM_SUPPORTED_VERSION: acp::ProtocolVersion = acp::ProtocolVersion::V1;
 
+macro_rules! dispatch_request_handler {
+    ($dispatch_tx:expr, $handler:expr) => {{
+        let dispatch_tx = $dispatch_tx.clone();
+        async move |args, responder, _connection| {
+            dispatch_tx
+                .unbounded_send(Box::new(move |cx, ctx| {
+                    $handler(args, responder, cx, ctx);
+                }))
+                .log_err();
+            Ok(())
+        }
+    }};
+}
+
+macro_rules! dispatch_notification_handler {
+    ($dispatch_tx:expr, $handler:expr) => {{
+        let dispatch_tx = $dispatch_tx.clone();
+        async move |notification, _connection| {
+            dispatch_tx
+                .unbounded_send(Box::new(move |cx, ctx| {
+                    $handler(notification, cx, ctx);
+                }))
+                .log_err();
+            Ok(())
+        }
+    }};
+}
+
 impl AcpConnection {
     pub async fn stdio(
         agent_id: AgentId,
@@ -263,7 +291,7 @@ impl AcpConnection {
         // Build a tapped transport that intercepts raw JSON-RPC lines for
         // the ACP logs panel. We replicate the ByteStreams→Lines conversion
         // manually so we can wrap the stream and sink with inspection.
-        let (stream_tap_tx, stream_tap_rx) = smol::channel::unbounded::<StreamMessage>();
+        let (stream_tap_tx, stream_tap_rx) = smol::channel::bounded::<StreamMessage>(4096);
 
         let incoming_lines = futures::io::BufReader::new(stdout).lines();
         let tapped_incoming = incoming_lines.inspect({
@@ -314,167 +342,40 @@ impl AcpConnection {
                 .name("zed")
                 // --- Request handlers (agent→client) ---
                 .on_receive_request(
-                    {
-                        let dispatch_tx = dispatch_tx.clone();
-                        async move |args: acp::RequestPermissionRequest,
-                                    responder: agent_client_protocol_core::Responder<
-                            acp::RequestPermissionResponse,
-                        >,
-                                    _connection: ConnectionTo<
-                            agent_client_protocol_core::Agent,
-                        >| {
-                            dispatch_tx
-                                .unbounded_send(Box::new(move |cx, ctx| {
-                                    handle_request_permission(args, responder, cx, ctx);
-                                }))
-                                .ok();
-                            Ok(())
-                        }
-                    },
+                    dispatch_request_handler!(dispatch_tx, handle_request_permission),
                     agent_client_protocol_core::on_receive_request!(),
                 )
                 .on_receive_request(
-                    {
-                        let dispatch_tx = dispatch_tx.clone();
-                        async move |args: acp::WriteTextFileRequest,
-                                    responder: agent_client_protocol_core::Responder<
-                            acp::WriteTextFileResponse,
-                        >,
-                                    _connection| {
-                            dispatch_tx
-                                .unbounded_send(Box::new(move |cx, ctx| {
-                                    handle_write_text_file(args, responder, cx, ctx);
-                                }))
-                                .ok();
-                            Ok(())
-                        }
-                    },
+                    dispatch_request_handler!(dispatch_tx, handle_write_text_file),
                     agent_client_protocol_core::on_receive_request!(),
                 )
                 .on_receive_request(
-                    {
-                        let dispatch_tx = dispatch_tx.clone();
-                        async move |args: acp::ReadTextFileRequest,
-                                    responder: agent_client_protocol_core::Responder<
-                            acp::ReadTextFileResponse,
-                        >,
-                                    _connection| {
-                            dispatch_tx
-                                .unbounded_send(Box::new(move |cx, ctx| {
-                                    handle_read_text_file(args, responder, cx, ctx);
-                                }))
-                                .ok();
-                            Ok(())
-                        }
-                    },
+                    dispatch_request_handler!(dispatch_tx, handle_read_text_file),
                     agent_client_protocol_core::on_receive_request!(),
                 )
                 .on_receive_request(
-                    {
-                        let dispatch_tx = dispatch_tx.clone();
-                        async move |args: acp::CreateTerminalRequest,
-                                    responder: agent_client_protocol_core::Responder<
-                            acp::CreateTerminalResponse,
-                        >,
-                                    _connection| {
-                            dispatch_tx
-                                .unbounded_send(Box::new(move |cx, ctx| {
-                                    handle_create_terminal(args, responder, cx, ctx);
-                                }))
-                                .ok();
-                            Ok(())
-                        }
-                    },
+                    dispatch_request_handler!(dispatch_tx, handle_create_terminal),
                     agent_client_protocol_core::on_receive_request!(),
                 )
                 .on_receive_request(
-                    {
-                        let dispatch_tx = dispatch_tx.clone();
-                        async move |args: acp::KillTerminalRequest,
-                                    responder: agent_client_protocol_core::Responder<
-                            acp::KillTerminalResponse,
-                        >,
-                                    _connection| {
-                            dispatch_tx
-                                .unbounded_send(Box::new(move |cx, ctx| {
-                                    handle_kill_terminal(args, responder, cx, ctx);
-                                }))
-                                .ok();
-                            Ok(())
-                        }
-                    },
+                    dispatch_request_handler!(dispatch_tx, handle_kill_terminal),
                     agent_client_protocol_core::on_receive_request!(),
                 )
                 .on_receive_request(
-                    {
-                        let dispatch_tx = dispatch_tx.clone();
-                        async move |args: acp::ReleaseTerminalRequest,
-                                    responder: agent_client_protocol_core::Responder<
-                            acp::ReleaseTerminalResponse,
-                        >,
-                                    _connection| {
-                            dispatch_tx
-                                .unbounded_send(Box::new(move |cx, ctx| {
-                                    handle_release_terminal(args, responder, cx, ctx);
-                                }))
-                                .ok();
-                            Ok(())
-                        }
-                    },
+                    dispatch_request_handler!(dispatch_tx, handle_release_terminal),
                     agent_client_protocol_core::on_receive_request!(),
                 )
                 .on_receive_request(
-                    {
-                        let dispatch_tx = dispatch_tx.clone();
-                        async move |args: acp::TerminalOutputRequest,
-                                    responder: agent_client_protocol_core::Responder<
-                            acp::TerminalOutputResponse,
-                        >,
-                                    _connection| {
-                            dispatch_tx
-                                .unbounded_send(Box::new(move |cx, ctx| {
-                                    handle_terminal_output(args, responder, cx, ctx);
-                                }))
-                                .ok();
-                            Ok(())
-                        }
-                    },
+                    dispatch_request_handler!(dispatch_tx, handle_terminal_output),
                     agent_client_protocol_core::on_receive_request!(),
                 )
                 .on_receive_request(
-                    {
-                        let dispatch_tx = dispatch_tx.clone();
-                        async move |args: acp::WaitForTerminalExitRequest,
-                                    responder: agent_client_protocol_core::Responder<
-                            acp::WaitForTerminalExitResponse,
-                        >,
-                                    _connection| {
-                            dispatch_tx
-                                .unbounded_send(Box::new(move |cx, ctx| {
-                                    handle_wait_for_terminal_exit(args, responder, cx, ctx);
-                                }))
-                                .ok();
-                            Ok(())
-                        }
-                    },
+                    dispatch_request_handler!(dispatch_tx, handle_wait_for_terminal_exit),
                     agent_client_protocol_core::on_receive_request!(),
                 )
                 // --- Notification handlers (agent→client) ---
                 .on_receive_notification(
-                    {
-                        let dispatch_tx = dispatch_tx.clone();
-                        async move |notification: acp::SessionNotification,
-                                    _connection: ConnectionTo<
-                            agent_client_protocol_core::Agent,
-                        >| {
-                            dispatch_tx
-                                .unbounded_send(Box::new(move |cx, ctx| {
-                                    handle_session_notification(notification, cx, ctx);
-                                }))
-                                .ok();
-                            Ok(())
-                        }
-                    },
+                    dispatch_notification_handler!(dispatch_tx, handle_session_notification),
                     agent_client_protocol_core::on_receive_notification!(),
                 )
                 .connect_with(
@@ -1857,82 +1758,86 @@ fn handle_session_notification(
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
-    let sessions = ctx.sessions.borrow();
-    let Some(session) = sessions.get(&notification.session_id) else {
-        log::warn!(
-            "Received session notification for unknown session: {:?}",
-            notification.session_id
-        );
-        return;
-    };
+    let (thread, update_clone) = {
+        let sessions = ctx.sessions.borrow();
+        let Some(session) = sessions.get(&notification.session_id) else {
+            log::warn!(
+                "Received session notification for unknown session: {:?}",
+                notification.session_id
+            );
+            return;
+        };
 
-    if let acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate {
-        current_mode_id, ..
-    }) = &notification.update
-    {
-        if let Some(session_modes) = &session.session_modes {
-            session_modes.borrow_mut().current_mode_id = current_mode_id.clone();
+        if let acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate {
+            current_mode_id,
+            ..
+        }) = &notification.update
+        {
+            if let Some(session_modes) = &session.session_modes {
+                session_modes.borrow_mut().current_mode_id = current_mode_id.clone();
+            }
         }
-    }
 
-    if let acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate {
-        config_options, ..
-    }) = &notification.update
-    {
-        if let Some(opts) = &session.config_options {
-            *opts.config_options.borrow_mut() = config_options.clone();
-            opts.tx.borrow_mut().send(()).ok();
+        if let acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate {
+            config_options,
+            ..
+        }) = &notification.update
+        {
+            if let Some(opts) = &session.config_options {
+                *opts.config_options.borrow_mut() = config_options.clone();
+                opts.tx.borrow_mut().send(()).ok();
+            }
         }
-    }
 
-    if let acp::SessionUpdate::SessionInfoUpdate(info_update) = &notification.update
-        && let Some(session_list) = ctx.session_list.borrow().as_ref()
-    {
-        session_list.send_info_update(notification.session_id.clone(), info_update.clone());
-    }
+        if let acp::SessionUpdate::SessionInfoUpdate(info_update) = &notification.update
+            && let Some(session_list) = ctx.session_list.borrow().as_ref()
+        {
+            session_list.send_info_update(notification.session_id.clone(), info_update.clone());
+        }
 
-    let update_clone = notification.update.clone();
-    let thread = session.thread.clone();
+        let update_clone = notification.update.clone();
+        let thread = session.thread.clone();
 
-    // Pre-handle: if a ToolCall carries terminal_info, create/register a display-only terminal.
-    if let acp::SessionUpdate::ToolCall(tc) = &update_clone {
-        if let Some(meta) = &tc.meta {
-            if let Some(terminal_info) = meta.get("terminal_info") {
-                if let Some(id_str) = terminal_info.get("terminal_id").and_then(|v| v.as_str()) {
-                    let terminal_id = acp::TerminalId::new(id_str);
-                    let cwd = terminal_info
-                        .get("cwd")
-                        .and_then(|v| v.as_str().map(PathBuf::from));
+        // Pre-handle: if a ToolCall carries terminal_info, create/register a display-only terminal.
+        if let acp::SessionUpdate::ToolCall(tc) = &update_clone {
+            if let Some(meta) = &tc.meta {
+                if let Some(terminal_info) = meta.get("terminal_info") {
+                    if let Some(id_str) = terminal_info.get("terminal_id").and_then(|v| v.as_str())
+                    {
+                        let terminal_id = acp::TerminalId::new(id_str);
+                        let cwd = terminal_info
+                            .get("cwd")
+                            .and_then(|v| v.as_str().map(PathBuf::from));
 
-                    let _ = thread.update(cx, |thread, cx| {
-                        let builder = TerminalBuilder::new_display_only(
-                            CursorShape::default(),
-                            AlternateScroll::On,
-                            None,
-                            0,
-                            cx.background_executor(),
-                            thread.project().read(cx).path_style(cx),
-                        )?;
-                        let lower = cx.new(|cx| builder.subscribe(cx));
-                        thread.on_terminal_provider_event(
-                            TerminalProviderEvent::Created {
-                                terminal_id,
-                                label: tc.title.clone(),
-                                cwd,
-                                output_byte_limit: None,
-                                terminal: lower,
-                            },
-                            cx,
-                        );
-                        anyhow::Ok(())
-                    });
+                        let _ = thread.update(cx, |thread, cx| {
+                            let builder = TerminalBuilder::new_display_only(
+                                CursorShape::default(),
+                                AlternateScroll::On,
+                                None,
+                                0,
+                                cx.background_executor(),
+                                thread.project().read(cx).path_style(cx),
+                            )?;
+                            let lower = cx.new(|cx| builder.subscribe(cx));
+                            thread.on_terminal_provider_event(
+                                TerminalProviderEvent::Created {
+                                    terminal_id,
+                                    label: tc.title.clone(),
+                                    cwd,
+                                    output_byte_limit: None,
+                                    terminal: lower,
+                                },
+                                cx,
+                            );
+                            anyhow::Ok(())
+                        });
+                    }
                 }
             }
         }
-    }
 
-    // Drop sessions borrow before updating the thread, which may re-borrow.
-    drop(sessions);
+        (thread, update_clone)
+    };
 
     // Forward the update to the acp_thread as usual.
     if let Err(err) = thread

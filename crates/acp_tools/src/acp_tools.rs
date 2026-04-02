@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashSet, fmt::Display, sync::Arc};
+use std::{collections::HashSet, fmt::Display, sync::Arc};
 
 use agent_client_protocol_core::schema as acp;
 use collections::HashMap;
@@ -42,6 +42,7 @@ pub enum StreamMessageContent {
     },
 }
 
+#[derive(Clone)]
 pub struct StreamMessage {
     pub direction: StreamMessageDirection,
     pub message: StreamMessageContent,
@@ -108,12 +109,10 @@ impl Global for GlobalAcpConnectionRegistry {}
 
 #[derive(Default)]
 pub struct AcpConnectionRegistry {
-    active_connection: RefCell<Option<ActiveConnection>>,
-}
-
-struct ActiveConnection {
-    agent_id: AgentId,
-    messages_rx: smol::channel::Receiver<StreamMessage>,
+    active_agent_id: Option<AgentId>,
+    generation: u64,
+    subscribers: Vec<smol::channel::Sender<StreamMessage>>,
+    _broadcast_task: Option<Task<()>>,
 }
 
 impl AcpConnectionRegistry {
@@ -128,16 +127,32 @@ impl AcpConnectionRegistry {
     }
 
     pub fn set_active_connection(
-        &self,
+        &mut self,
         agent_id: AgentId,
         messages_rx: smol::channel::Receiver<StreamMessage>,
         cx: &mut Context<Self>,
     ) {
-        self.active_connection.replace(Some(ActiveConnection {
-            agent_id,
-            messages_rx,
+        self.active_agent_id = Some(agent_id);
+        self.generation += 1;
+        self.subscribers.clear();
+
+        self._broadcast_task = Some(cx.spawn(async move |this, cx| {
+            while let Ok(message) = messages_rx.recv().await {
+                this.update(cx, |this, _cx| {
+                    this.subscribers
+                        .retain(|sender| sender.try_send(message.clone()).is_ok());
+                })
+                .ok();
+            }
         }));
+
         cx.notify();
+    }
+
+    pub fn subscribe(&mut self) -> smol::channel::Receiver<StreamMessage> {
+        let (sender, receiver) = smol::channel::bounded(4096);
+        self.subscribers.push(sender);
+        receiver
     }
 }
 
@@ -152,6 +167,7 @@ struct AcpTools {
 
 struct WatchedConnection {
     agent_id: AgentId,
+    generation: u64,
     messages: Vec<WatchedConnectionMessage>,
     list_state: ListState,
     incoming_request_methods: HashMap<RequestId, Arc<str>>,
@@ -181,18 +197,25 @@ impl AcpTools {
     }
 
     fn update_connection(&mut self, cx: &mut Context<Self>) {
-        let active_connection = self.connection_registry.read(cx).active_connection.borrow();
-        let Some(active_connection) = active_connection.as_ref() else {
+        let (generation, agent_id) = {
+            let registry = self.connection_registry.read(cx);
+            (registry.generation, registry.active_agent_id.clone())
+        };
+
+        let Some(agent_id) = agent_id else {
             return;
         };
 
-        if let Some(watched_connection) = self.watched_connection.as_ref() {
-            if watched_connection.agent_id == active_connection.agent_id {
+        if let Some(watched) = self.watched_connection.as_ref() {
+            if watched.generation == generation {
                 return;
             }
         }
 
-        let messages_rx = active_connection.messages_rx.clone();
+        let messages_rx = self
+            .connection_registry
+            .update(cx, |registry, _cx| registry.subscribe());
+
         let task = cx.spawn(async move |this, cx| {
             while let Ok(message) = messages_rx.recv().await {
                 this.update(cx, |this, cx| {
@@ -203,7 +226,8 @@ impl AcpTools {
         });
 
         self.watched_connection = Some(WatchedConnection {
-            agent_id: active_connection.agent_id.clone(),
+            agent_id,
+            generation,
             messages: vec![],
             list_state: ListState::new(0, ListAlignment::Bottom, px(2048.)),
             incoming_request_methods: HashMap::default(),
