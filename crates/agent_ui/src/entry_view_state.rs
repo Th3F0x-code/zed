@@ -3,7 +3,7 @@ use std::ops::Range;
 use super::thread_history::ThreadHistory;
 use acp_thread::{AcpThread, AgentThreadEntry};
 use agent::ThreadStore;
-use agent_client_protocol_core::schema::ToolCallId;
+use agent_client_protocol::schema as acp;
 use collections::HashMap;
 use editor::{Editor, EditorEvent, EditorMode, MinimapVisibility, SizingBehavior};
 use gpui::{
@@ -286,9 +286,9 @@ pub struct EntryViewEvent {
 }
 
 pub enum ViewEvent {
-    NewDiff(ToolCallId),
-    NewTerminal(ToolCallId),
-    TerminalMovedToBackground(ToolCallId),
+    NewDiff(acp::ToolCallId),
+    NewTerminal(acp::ToolCallId),
+    TerminalMovedToBackground(acp::ToolCallId),
     MessageEditorEvent(Entity<MessageEditor>, MessageEditorEvent),
     OpenDiffLocation {
         path: String,
@@ -465,7 +465,7 @@ mod tests {
     use std::sync::Arc;
 
     use acp_thread::{AgentConnection, StubAgentConnection};
-    use agent_client_protocol_core::schema as acp;
+    use agent_client_protocol::schema as acp;
     use buffer_diff::{DiffHunkStatus, DiffHunkStatusKind};
     use editor::RowInfo;
     use fs::FakeFs;

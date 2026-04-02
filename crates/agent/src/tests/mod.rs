@@ -3,7 +3,7 @@ use acp_thread::{
     AgentConnection, AgentModelGroupName, AgentModelList, PermissionOptions, ThreadStatus,
     UserMessageId,
 };
-use agent_client_protocol_core::schema as acp;
+use agent_client_protocol::schema as acp;
 use agent_settings::AgentProfileId;
 use anyhow::Result;
 use client::{Client, UserStore};

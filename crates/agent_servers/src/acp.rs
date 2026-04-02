@@ -4,8 +4,8 @@ use acp_thread::{
 };
 use acp_tools::{AcpConnectionRegistry, StreamMessage, StreamMessageDirection};
 use action_log::ActionLog;
-use agent_client_protocol_core::schema::{self as acp, ErrorCode};
-use agent_client_protocol_core::{ConnectionTo, Lines};
+use agent_client_protocol::schema::{self as acp, ErrorCode};
+use agent_client_protocol::{Agent, Client, ConnectionTo, JsonRpcResponse, Lines, Responder};
 use anyhow::anyhow;
 use collections::HashMap;
 use feature_flags::{AcpBetaFeatureFlag, FeatureFlagAppExt as _};
@@ -54,7 +54,7 @@ type ForegroundWork = Box<dyn FnOnce(&mut AsyncApp, &ClientContext) + Send>;
 pub struct AcpConnection {
     id: AgentId,
     telemetry_id: SharedString,
-    connection: ConnectionTo<agent_client_protocol_core::Agent>,
+    connection: ConnectionTo<Agent>,
     sessions: Rc<RefCell<HashMap<acp::SessionId, AcpSession>>>,
     auth_methods: Vec<acp::AuthMethod>,
     command: AgentServerCommand,
@@ -96,13 +96,13 @@ pub struct AcpSession {
 }
 
 pub struct AcpSessionList {
-    connection: ConnectionTo<agent_client_protocol_core::Agent>,
+    connection: ConnectionTo<Agent>,
     updates_tx: smol::channel::Sender<acp_thread::SessionListUpdate>,
     updates_rx: smol::channel::Receiver<acp_thread::SessionListUpdate>,
 }
 
 impl AcpSessionList {
-    fn new(connection: ConnectionTo<agent_client_protocol_core::Agent>) -> Self {
+    fn new(connection: ConnectionTo<Agent>) -> Self {
         let (tx, rx) = smol::channel::unbounded();
         Self {
             connection,
@@ -337,50 +337,50 @@ impl AcpConnection {
         // All handlers forward work to the foreground dispatch channel.
         let connection_future = {
             let dispatch_tx = dispatch_tx.clone();
-            agent_client_protocol_core::Client
+            Client
                 .builder()
                 .name("zed")
                 // --- Request handlers (agent→client) ---
                 .on_receive_request(
                     dispatch_request_handler!(dispatch_tx, handle_request_permission),
-                    agent_client_protocol_core::on_receive_request!(),
+                    agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
                     dispatch_request_handler!(dispatch_tx, handle_write_text_file),
-                    agent_client_protocol_core::on_receive_request!(),
+                    agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
                     dispatch_request_handler!(dispatch_tx, handle_read_text_file),
-                    agent_client_protocol_core::on_receive_request!(),
+                    agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
                     dispatch_request_handler!(dispatch_tx, handle_create_terminal),
-                    agent_client_protocol_core::on_receive_request!(),
+                    agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
                     dispatch_request_handler!(dispatch_tx, handle_kill_terminal),
-                    agent_client_protocol_core::on_receive_request!(),
+                    agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
                     dispatch_request_handler!(dispatch_tx, handle_release_terminal),
-                    agent_client_protocol_core::on_receive_request!(),
+                    agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
                     dispatch_request_handler!(dispatch_tx, handle_terminal_output),
-                    agent_client_protocol_core::on_receive_request!(),
+                    agent_client_protocol::on_receive_request!(),
                 )
                 .on_receive_request(
                     dispatch_request_handler!(dispatch_tx, handle_wait_for_terminal_exit),
-                    agent_client_protocol_core::on_receive_request!(),
+                    agent_client_protocol::on_receive_request!(),
                 )
                 // --- Notification handlers (agent→client) ---
                 .on_receive_notification(
                     dispatch_notification_handler!(dispatch_tx, handle_session_notification),
-                    agent_client_protocol_core::on_receive_notification!(),
+                    agent_client_protocol::on_receive_notification!(),
                 )
                 .connect_with(
                     transport,
-                    move |connection: ConnectionTo<agent_client_protocol_core::Agent>| async move {
+                    move |connection: ConnectionTo<Agent>| async move {
                         connection_tx.send(connection.clone()).ok();
                         // Keep the connection alive until the transport closes.
                         futures::future::pending::<Result<(), acp::Error>>().await
@@ -396,7 +396,7 @@ impl AcpConnection {
         });
 
         // Wait for the ConnectionTo<Agent> handle.
-        let connection: ConnectionTo<agent_client_protocol_core::Agent> = connection_rx
+        let connection: ConnectionTo<Agent> = connection_rx
             .await
             .context("Failed to receive ACP connection handle")?;
 
@@ -1465,7 +1465,7 @@ fn config_state(
 
 struct AcpSessionModes {
     session_id: acp::SessionId,
-    connection: ConnectionTo<agent_client_protocol_core::Agent>,
+    connection: ConnectionTo<Agent>,
     state: Rc<RefCell<acp::SessionModeState>>,
 }
 
@@ -1507,14 +1507,14 @@ impl acp_thread::AgentSessionModes for AcpSessionModes {
 
 struct AcpModelSelector {
     session_id: acp::SessionId,
-    connection: ConnectionTo<agent_client_protocol_core::Agent>,
+    connection: ConnectionTo<Agent>,
     state: Rc<RefCell<acp::SessionModelState>>,
 }
 
 impl AcpModelSelector {
     fn new(
         session_id: acp::SessionId,
-        connection: ConnectionTo<agent_client_protocol_core::Agent>,
+        connection: ConnectionTo<Agent>,
         state: Rc<RefCell<acp::SessionModelState>>,
     ) -> Self {
         Self {
@@ -1580,7 +1580,7 @@ impl acp_thread::AgentModelSelector for AcpModelSelector {
 
 struct AcpSessionConfigOptions {
     session_id: acp::SessionId,
-    connection: ConnectionTo<agent_client_protocol_core::Agent>,
+    connection: ConnectionTo<Agent>,
     state: Rc<RefCell<Vec<acp::SessionConfigOption>>>,
     watch_tx: Rc<RefCell<watch::Sender<()>>>,
     watch_rx: watch::Receiver<()>,
@@ -1638,16 +1638,13 @@ fn session_thread(
         .ok_or_else(|| acp::Error::internal_error().data(format!("unknown session: {session_id}")))
 }
 
-fn respond_err<T: agent_client_protocol_core::JsonRpcResponse + Send + 'static>(
-    responder: agent_client_protocol_core::Responder<T>,
-    err: acp::Error,
-) {
+fn respond_err<T: JsonRpcResponse + Send + 'static>(responder: Responder<T>, err: acp::Error) {
     responder.respond_with_error(err).log_err();
 }
 
 fn handle_request_permission(
     args: acp::RequestPermissionRequest,
-    responder: agent_client_protocol_core::Responder<acp::RequestPermissionResponse>,
+    responder: Responder<acp::RequestPermissionResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
@@ -1686,7 +1683,7 @@ fn handle_request_permission(
 
 fn handle_write_text_file(
     args: acp::WriteTextFileRequest,
-    responder: agent_client_protocol_core::Responder<acp::WriteTextFileResponse>,
+    responder: Responder<acp::WriteTextFileResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
@@ -1721,7 +1718,7 @@ fn handle_write_text_file(
 
 fn handle_read_text_file(
     args: acp::ReadTextFileRequest,
-    responder: agent_client_protocol_core::Responder<acp::ReadTextFileResponse>,
+    responder: Responder<acp::ReadTextFileResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
@@ -1903,7 +1900,7 @@ fn handle_session_notification(
 
 fn handle_create_terminal(
     args: acp::CreateTerminalRequest,
-    responder: agent_client_protocol_core::Responder<acp::CreateTerminalResponse>,
+    responder: Responder<acp::CreateTerminalResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
@@ -1966,7 +1963,7 @@ fn handle_create_terminal(
 
 fn handle_kill_terminal(
     args: acp::KillTerminalRequest,
-    responder: agent_client_protocol_core::Responder<acp::KillTerminalResponse>,
+    responder: Responder<acp::KillTerminalResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
@@ -1991,7 +1988,7 @@ fn handle_kill_terminal(
 
 fn handle_release_terminal(
     args: acp::ReleaseTerminalRequest,
-    responder: agent_client_protocol_core::Responder<acp::ReleaseTerminalResponse>,
+    responder: Responder<acp::ReleaseTerminalResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
@@ -2018,7 +2015,7 @@ fn handle_release_terminal(
 
 fn handle_terminal_output(
     args: acp::TerminalOutputRequest,
-    responder: agent_client_protocol_core::Responder<acp::TerminalOutputResponse>,
+    responder: Responder<acp::TerminalOutputResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
@@ -2047,7 +2044,7 @@ fn handle_terminal_output(
 
 fn handle_wait_for_terminal_exit(
     args: acp::WaitForTerminalExitRequest,
-    responder: agent_client_protocol_core::Responder<acp::WaitForTerminalExitResponse>,
+    responder: Responder<acp::WaitForTerminalExitResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {

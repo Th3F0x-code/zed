@@ -12,7 +12,7 @@ use http_client::read_no_proxy_from_env;
 use project::{AgentId, Project, agent_server_store::AgentServerStore};
 
 use acp_thread::AgentConnection;
-use agent_client_protocol_core::schema::{
+use agent_client_protocol::schema::{
     ModelId, SessionConfigId, SessionConfigValueId, SessionModeId,
 };
 use anyhow::Result;

@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt::Display, sync::Arc};
 
-use agent_client_protocol_core::schema as acp;
+use agent_client_protocol::schema as acp;
 use collections::HashMap;
 use gpui::{
     App, Empty, Entity, EventEmitter, FocusHandle, Focusable, Global, ListAlignment, ListState,

@@ -7,7 +7,7 @@ use acp_thread::{
 use acp_thread::{AgentConnection, Plan};
 use action_log::{ActionLog, ActionLogTelemetry, DiffStats};
 use agent::{NativeAgentServer, NativeAgentSessionList, SharedThread, ThreadStore};
-use agent_client_protocol_core::schema as acp;
+use agent_client_protocol::schema as acp;
 #[cfg(test)]
 use agent_servers::AgentServerDelegate;
 use agent_servers::{AgentServer, GEMINI_TERMINAL_AUTH_METHOD_ID};
@@ -2745,12 +2745,12 @@ fn plan_label_markdown_style(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use acp::SessionId;
     use acp_thread::{
         AgentSessionList, AgentSessionListRequest, AgentSessionListResponse, StubAgentConnection,
     };
     use action_log::ActionLog;
     use agent::{AgentTool, EditFileTool, FetchTool, TerminalTool, ToolPermissionContext};
-    use agent_client_protocol_core::schema::SessionId;
     use editor::MultiBufferOffset;
     use fs::FakeFs;
     use gpui::{EventEmitter, TestAppContext, VisualTestContext};

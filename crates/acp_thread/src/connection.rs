@@ -1,5 +1,5 @@
 use crate::AcpThread;
-use agent_client_protocol_core::schema as acp;
+use agent_client_protocol::schema as acp;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use collections::{HashMap, IndexMap};
