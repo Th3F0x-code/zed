@@ -2,9 +2,10 @@ use acp_thread::{
     AgentConnection, AgentSessionInfo, AgentSessionList, AgentSessionListRequest,
     AgentSessionListResponse,
 };
+use acp_tools::{AcpConnectionRegistry, StreamMessage, StreamMessageDirection};
 use action_log::ActionLog;
 use agent_client_protocol_core::schema::{self as acp, ErrorCode};
-use agent_client_protocol_core::{ByteStreams, ConnectionTo};
+use agent_client_protocol_core::{ConnectionTo, Lines};
 use anyhow::anyhow;
 use collections::HashMap;
 use feature_flags::{AcpBetaFeatureFlag, FeatureFlagAppExt as _};
@@ -259,8 +260,46 @@ impl AcpConnection {
         // closures to the !Send foreground thread.
         let (dispatch_tx, dispatch_rx) = mpsc::unbounded::<ForegroundWork>();
 
-        // Build the transport from child stdio
-        let transport = ByteStreams::new(stdin, stdout);
+        // Build a tapped transport that intercepts raw JSON-RPC lines for
+        // the ACP logs panel. We replicate the ByteStreams→Lines conversion
+        // manually so we can wrap the stream and sink with inspection.
+        let (stream_tap_tx, stream_tap_rx) = smol::channel::unbounded::<StreamMessage>();
+
+        let incoming_lines = futures::io::BufReader::new(stdout).lines();
+        let tapped_incoming = incoming_lines.inspect({
+            let tap_tx = stream_tap_tx.clone();
+            move |result| {
+                if let Ok(line) = result {
+                    if let Some(msg) =
+                        StreamMessage::from_json_line(StreamMessageDirection::Incoming, line)
+                    {
+                        tap_tx.try_send(msg).ok();
+                    }
+                }
+            }
+        });
+
+        let outgoing_sink =
+            futures::sink::unfold(Box::pin(stdin), async move |mut writer, line: String| {
+                use futures::AsyncWriteExt;
+                let mut bytes = line.into_bytes();
+                bytes.push(b'\n');
+                writer.write_all(&bytes).await?;
+                Ok::<_, std::io::Error>(writer)
+            });
+        let tapped_outgoing = futures::SinkExt::with(outgoing_sink, {
+            let tap_tx = stream_tap_tx;
+            move |line: String| {
+                if let Some(msg) =
+                    StreamMessage::from_json_line(StreamMessageDirection::Outgoing, &line)
+                {
+                    tap_tx.try_send(msg).ok();
+                }
+                futures::future::ok::<String, std::io::Error>(line)
+            }
+        });
+
+        let transport = Lines::new(tapped_outgoing, tapped_incoming);
 
         // Use a oneshot channel to extract the ConnectionTo<Agent> from the
         // connect_with closure.
@@ -505,13 +544,11 @@ impl AcpConnection {
             }
         });
 
-        // TODO: Update AcpConnectionRegistry to support ConnectionTo<Agent>
-        // The old streaming/subscribe API is not available in agent-client-protocol-core.
-        // cx.update(|cx| {
-        //     AcpConnectionRegistry::default_global(cx).update(cx, |registry, cx| {
-        //         registry.set_active_connection(agent_id.clone(), &connection, cx)
-        //     });
-        // });
+        cx.update(|cx| {
+            AcpConnectionRegistry::default_global(cx).update(cx, |registry, cx| {
+                registry.set_active_connection(agent_id.clone(), stream_tap_rx, cx)
+            });
+        });
 
         let response = connection
             .send_request(

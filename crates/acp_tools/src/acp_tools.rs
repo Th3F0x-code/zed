@@ -17,21 +17,16 @@ use workspace::{
     Item, ItemHandle, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace,
 };
 
-// Stub types for the old streaming API which is not available in agent-client-protocol-core.
-// These allow the ACP debug panel code to compile but the streaming won't be active.
-#[allow(dead_code)]
-type RequestId = String;
+pub type RequestId = String;
 
 #[derive(Clone)]
-#[allow(dead_code)]
-enum StreamMessageDirection {
+pub enum StreamMessageDirection {
     Incoming,
     Outgoing,
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
-enum StreamMessageContent {
+pub enum StreamMessageContent {
     Request {
         id: RequestId,
         method: Arc<str>,
@@ -47,10 +42,49 @@ enum StreamMessageContent {
     },
 }
 
-#[allow(dead_code)]
-struct StreamMessage {
-    direction: StreamMessageDirection,
-    message: StreamMessageContent,
+pub struct StreamMessage {
+    pub direction: StreamMessageDirection,
+    pub message: StreamMessageContent,
+}
+
+impl StreamMessage {
+    pub fn from_json_line(direction: StreamMessageDirection, line: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        let obj = value.as_object()?;
+
+        let message = if let Some(method) = obj.get("method").and_then(|m| m.as_str()) {
+            if let Some(id) = obj.get("id") {
+                StreamMessageContent::Request {
+                    id: id.to_string(),
+                    method: method.into(),
+                    params: obj.get("params").cloned(),
+                }
+            } else {
+                StreamMessageContent::Notification {
+                    method: method.into(),
+                    params: obj.get("params").cloned(),
+                }
+            }
+        } else if let Some(id) = obj.get("id") {
+            if let Some(error) = obj.get("error") {
+                let acp_err = serde_json::from_value::<acp::Error>(error.clone())
+                    .unwrap_or_else(|_| acp::Error::internal_error());
+                StreamMessageContent::Response {
+                    id: id.to_string(),
+                    result: Err(acp_err),
+                }
+            } else {
+                StreamMessageContent::Response {
+                    id: id.to_string(),
+                    result: Ok(obj.get("result").cloned()),
+                }
+            }
+        } else {
+            return None;
+        };
+
+        Some(StreamMessage { direction, message })
+    }
 }
 
 actions!(dev, [OpenAcpLogs]);
@@ -79,6 +113,7 @@ pub struct AcpConnectionRegistry {
 
 struct ActiveConnection {
     agent_id: AgentId,
+    messages_rx: smol::channel::Receiver<StreamMessage>,
 }
 
 impl AcpConnectionRegistry {
@@ -92,9 +127,16 @@ impl AcpConnectionRegistry {
         }
     }
 
-    pub fn set_active_connection(&self, agent_id: AgentId, cx: &mut Context<Self>) {
-        self.active_connection
-            .replace(Some(ActiveConnection { agent_id }));
+    pub fn set_active_connection(
+        &self,
+        agent_id: AgentId,
+        messages_rx: smol::channel::Receiver<StreamMessage>,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_connection.replace(Some(ActiveConnection {
+            agent_id,
+            messages_rx,
+        }));
         cx.notify();
     }
 }
@@ -112,9 +154,7 @@ struct WatchedConnection {
     agent_id: AgentId,
     messages: Vec<WatchedConnectionMessage>,
     list_state: ListState,
-    #[allow(dead_code)]
     incoming_request_methods: HashMap<RequestId, Arc<str>>,
-    #[allow(dead_code)]
     outgoing_request_methods: HashMap<RequestId, Arc<str>>,
     _task: Task<()>,
 }
@@ -152,17 +192,26 @@ impl AcpTools {
             }
         }
 
+        let messages_rx = active_connection.messages_rx.clone();
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(message) = messages_rx.recv().await {
+                this.update(cx, |this, cx| {
+                    this.push_stream_message(message, cx);
+                })
+                .ok();
+            }
+        });
+
         self.watched_connection = Some(WatchedConnection {
             agent_id: active_connection.agent_id.clone(),
             messages: vec![],
             list_state: ListState::new(0, ListAlignment::Bottom, px(2048.)),
             incoming_request_methods: HashMap::default(),
             outgoing_request_methods: HashMap::default(),
-            _task: Task::ready(()),
+            _task: task,
         });
     }
 
-    #[allow(dead_code)]
     fn push_stream_message(&mut self, stream_message: StreamMessage, cx: &mut Context<Self>) {
         let Some(connection) = self.watched_connection.as_mut() else {
             return;
@@ -427,7 +476,6 @@ impl WatchedConnectionMessage {
     }
 }
 
-#[allow(dead_code)]
 fn collapsed_params_md(
     params: &serde_json::Value,
     language_registry: &Arc<LanguageRegistry>,
@@ -460,7 +508,6 @@ fn expanded_params_md(
     cx.new(|cx| Markdown::new(params_md.into(), Some(language_registry.clone()), None, cx))
 }
 
-#[allow(dead_code)]
 enum MessageType {
     Request,
     Response,
