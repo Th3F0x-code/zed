@@ -3,8 +3,8 @@ use crate::{
     DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool, FindPathTool, GrepTool,
     ListDirectoryTool, MovePathTool, NowTool, OpenTool, ProjectSnapshot, ReadFileTool,
     RestoreFileFromDiskTool, SaveFileTool, SkillsContext, SpawnAgentTool, StreamingEditFileTool,
-    SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision, WebSearchTool,
-    decide_permission_from_settings,
+    SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision,
+    UpdatePlanTool, WebSearchTool, decide_permission_from_settings,
 };
 use acp_thread::{MentionUri, UserMessageId};
 use action_log::ActionLog;

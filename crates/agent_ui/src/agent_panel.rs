@@ -25,8 +25,9 @@ use zed_actions::agent::{
     ResolveConflictsWithAgent, ReviewBranchDiff,
 };
 
+use crate::DEFAULT_THREAD_TITLE;
 use crate::thread_metadata_store::ThreadMetadataStore;
-use crate::ui::{AcpOnboardingModal, ClaudeCodeOnboardingModal, HoldForDefault};
+use crate::ui::{AcpOnboardingModal, HoldForDefault};
 use crate::{
     AddContextServer, AgentDiffPane, ConversationView, CopyThreadToClipboard, CycleStartThreadIn,
     Follow, InlineAssistant, LoadThreadFromClipboard, NewThread, OpenActiveThreadAsMarkdown,
@@ -39,10 +40,6 @@ use crate::{
 use crate::{
     Agent, AgentInitialContent, ExternalSourcePrompt, NewExternalAgentThread,
     NewNativeAgentThreadFromSummary,
-};
-use crate::{
-    DEFAULT_THREAD_TITLE,
-    ui::{AcpOnboardingModal, HoldForDefault},
 };
 use crate::{ExpandMessageEditor, ThreadHistoryView};
 use crate::{ManageProfiles, ThreadHistoryViewEvent};

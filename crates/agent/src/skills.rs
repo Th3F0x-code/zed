@@ -121,7 +121,7 @@ fn parse_skill_file(content: &str, expected_dir_name: &str) -> Result<(SkillMeta
         None => return Err(anyhow!("YAML frontmatter not properly closed with ---")),
     };
 
-    let metadata: SkillMetadata = serde_yml::from_str(&yaml_part)
+    let metadata: SkillMetadata = yaml_serde::from_str(&yaml_part)
         .map_err(|e| anyhow!("failed to parse YAML frontmatter: {}", e))?;
 
     metadata.validate(expected_dir_name)?;
