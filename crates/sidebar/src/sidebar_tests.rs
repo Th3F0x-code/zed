@@ -5042,7 +5042,7 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
     assert!(
         !fs.directories(false)
             .iter()
-            .any(|p| p == std::path::Path::new("/wt-feature")),
+            .any(|p| p.ends_with("wt-feature")),
         "worktree directory should not exist before restore"
     );
 
@@ -5106,7 +5106,7 @@ async fn test_archive_and_restore_single_worktree(cx: &mut TestAppContext) {
     assert!(
         fs.directories(false)
             .iter()
-            .any(|p| p == std::path::Path::new("/wt-feature")),
+            .any(|p| p.ends_with("wt-feature")),
         "expected worktree directory to be recreated after restore, dirs: {:?}",
         fs.directories(false)
     );
