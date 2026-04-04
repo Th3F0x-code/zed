@@ -1285,3 +1285,59 @@ impl PickerDelegate for ProjectPickerDelegate {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fuzzy_match_positions_returns_byte_indices() {
+        // "🔥abc" — the fire emoji is 4 bytes, so 'a' starts at byte 4, 'b' at 5, 'c' at 6.
+        let text = "🔥abc";
+        let positions = fuzzy_match_positions("ab", text).expect("should match");
+        assert_eq!(positions, vec![4, 5]);
+
+        // Verify positions are valid char boundaries (this is the assertion that
+        // panicked before the fix).
+        for &pos in &positions {
+            assert!(
+                text.is_char_boundary(pos),
+                "position {pos} is not a valid UTF-8 boundary in {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fuzzy_match_positions_ascii_still_works() {
+        let positions = fuzzy_match_positions("he", "hello").expect("should match");
+        assert_eq!(positions, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_fuzzy_match_positions_case_insensitive() {
+        let positions = fuzzy_match_positions("HE", "hello").expect("should match");
+        assert_eq!(positions, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_fuzzy_match_positions_no_match() {
+        assert!(fuzzy_match_positions("xyz", "hello").is_none());
+    }
+
+    #[test]
+    fn test_fuzzy_match_positions_multi_byte_interior() {
+        // "café" — 'é' is 2 bytes (0xC3 0xA9), so 'f' starts at byte 4, 'é' at byte 5.
+        let text = "café";
+        let positions = fuzzy_match_positions("fé", text).expect("should match");
+        // 'c'=0, 'a'=1, 'f'=2, 'é'=3..4 — wait, let's verify:
+        // Actually: c=1 byte, a=1 byte, f=1 byte, é=2 bytes
+        // So byte positions: c=0, a=1, f=2, é=3
+        assert_eq!(positions, vec![2, 3]);
+        for &pos in &positions {
+            assert!(
+                text.is_char_boundary(pos),
+                "position {pos} is not a valid UTF-8 boundary in {text:?}"
+            );
+        }
+    }
+}
