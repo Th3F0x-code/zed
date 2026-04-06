@@ -71,17 +71,17 @@ struct StateInner {
     scroll_handler: Option<Box<dyn FnMut(&ListScrollEvent, &mut Window, &mut App)>>,
     scrollbar_drag_start_height: Option<Pixels>,
     measuring_behavior: ListMeasuringBehavior,
-    pending_scroll: Option<PendingScrollFraction>,
+    pending_scroll: Option<PendingScrollOffset>,
     follow_state: FollowState,
 }
 
-/// Keeps track of a fractional scroll position within an item for restoration
-/// after remeasurement.
-struct PendingScrollFraction {
+/// Keeps track of a scroll position within an item for restoration after
+/// remeasurement.
+struct PendingScrollOffset {
     /// The index of the item to scroll within.
     item_ix: usize,
-    /// Fractional offset (0.0 to 1.0) within the item's height.
-    fraction: f32,
+    /// Pixel offset within the item.
+    offset_in_item: Pixels,
 }
 
 /// Controls whether the list automatically follows new content at the end.
@@ -341,27 +341,20 @@ impl ListState {
         let state = &mut *self.0.borrow_mut();
 
         // If the scroll-top item falls within the remeasured range,
-        // store a fractional offset so the layout can restore the
-        // proportional scroll position after the item is re-rendered
-        // at its new height.
+        // store its pixel offset so the layout can restore the same
+        // visible position after the item is re-rendered at its new height.
         if let Some(scroll_top) = state.logical_scroll_top {
             if range.contains(&scroll_top.item_ix) {
                 let mut cursor = state.items.cursor::<Count>(());
                 cursor.seek(&Count(scroll_top.item_ix), Bias::Right);
 
-                if let Some(item) = cursor.item() {
-                    if let Some(size) = item.size() {
-                        let fraction = if size.height.0 > 0.0 {
-                            (scroll_top.offset_in_item.0 / size.height.0).clamp(0.0, 1.0)
-                        } else {
-                            0.0
-                        };
-
-                        state.pending_scroll = Some(PendingScrollFraction {
-                            item_ix: scroll_top.item_ix,
-                            fraction,
-                        });
-                    }
+                if let Some(item) = cursor.item()
+                    && item.size().is_some()
+                {
+                    state.pending_scroll = Some(PendingScrollOffset {
+                        item_ix: scroll_top.item_ix,
+                        offset_in_item: scroll_top.offset_in_item,
+                    });
                 }
             }
         }
@@ -872,13 +865,13 @@ impl StateInner {
                 size = Some(element_size);
 
                 // If there's a pending scroll adjustment for the scroll-top
-                // item, apply it, ensuring proportional scroll position is
-                // maintained after re-measuring.
+                // item, apply it so the visible position stays locked after
+                // re-measuring.
                 if ix == 0 {
                     if let Some(pending_scroll) = self.pending_scroll.take() {
                         if pending_scroll.item_ix == scroll_top.item_ix {
                             scroll_top.offset_in_item =
-                                Pixels(pending_scroll.fraction * element_size.height.0);
+                                pending_scroll.offset_in_item.min(element_size.height);
                             self.logical_scroll_top = Some(scroll_top);
                         }
                     }
@@ -1629,9 +1622,8 @@ mod test {
         assert_eq!(offset.offset_in_item, px(40.));
 
         // Update the `item_height` to be 50px instead of 100px so we can assert
-        // that the scroll position is proportionally preserved, that is,
-        // instead of 40px from the top of item 2, it should be 20px, since the
-        // item's height has been halved.
+        // that the scroll position stays locked to the same absolute pixel offset
+        // within item 2 after remeasurement.
         item_height.set(50);
         state.remeasure();
 
@@ -1641,7 +1633,7 @@ mod test {
 
         let offset = state.logical_scroll_top();
         assert_eq!(offset.item_ix, 2);
-        assert_eq!(offset.offset_in_item, px(20.));
+        assert_eq!(offset.offset_in_item, px(40.));
     }
 
     #[gpui::test]
