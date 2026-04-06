@@ -161,6 +161,40 @@ impl WgpuRenderer {
             .expect("GPU resources not available")
     }
 
+    fn select_color_atlas_texture_format(
+        adapter: &wgpu::Adapter,
+    ) -> anyhow::Result<wgpu::TextureFormat> {
+        let required_usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+        let bgra_features = adapter.get_texture_format_features(wgpu::TextureFormat::Bgra8Unorm);
+        if bgra_features.allowed_usages.contains(required_usages) {
+            return Ok(wgpu::TextureFormat::Bgra8Unorm);
+        }
+
+        let rgba_features = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm);
+        if rgba_features.allowed_usages.contains(required_usages) {
+            let info = adapter.get_info();
+            warn!(
+                "Adapter {} ({:?}) does not support Bgra8Unorm atlas textures with usages {:?}; \
+                 falling back to Rgba8Unorm atlas textures.",
+                info.name, info.backend, required_usages,
+            );
+            return Ok(wgpu::TextureFormat::Rgba8Unorm);
+        }
+
+        let info = adapter.get_info();
+        Err(anyhow::anyhow!(
+            "Adapter {} ({:?}, device={:#06x}) does not support a usable color atlas texture \
+             format with usages {:?}. Bgra8Unorm allowed usages: {:?}; \
+             Rgba8Unorm allowed usages: {:?}.",
+            info.name,
+            info.backend,
+            info.device,
+            required_usages,
+            bgra_features.allowed_usages,
+            rgba_features.allowed_usages,
+        ))
+    }
+
     /// Creates a new WgpuRenderer from raw window handles.
     ///
     /// The `gpu_context` is a shared reference that coordinates GPU context across
@@ -217,9 +251,11 @@ impl WgpuRenderer {
             None => ctx_ref.insert(WgpuContext::new(instance, &surface, compositor_gpu)?),
         };
 
+        let color_atlas_texture_format = Self::select_color_atlas_texture_format(&context.adapter)?;
         let atlas = Arc::new(WgpuAtlas::new(
             Arc::clone(&context.device),
             Arc::clone(&context.queue),
+            color_atlas_texture_format,
         ));
 
         Self::new_internal(
@@ -243,9 +279,11 @@ impl WgpuRenderer {
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?;
 
+        let color_atlas_texture_format = Self::select_color_atlas_texture_format(&context.adapter)?;
         let atlas = Arc::new(WgpuAtlas::new(
             Arc::clone(&context.device),
             Arc::clone(&context.queue),
+            color_atlas_texture_format,
         ));
 
         Self::new_internal(None, context, surface, config, None, atlas)
@@ -1805,10 +1843,14 @@ impl WgpuRenderer {
         let gpu_context = Rc::clone(gpu_context);
         let ctx_ref = gpu_context.borrow();
         let context = ctx_ref.as_ref().expect("context should exist");
+        let color_atlas_texture_format = Self::select_color_atlas_texture_format(&context.adapter)?;
 
         self.resources = None;
-        self.atlas
-            .handle_device_lost(Arc::clone(&context.device), Arc::clone(&context.queue));
+        self.atlas.handle_device_lost(
+            Arc::clone(&context.device),
+            Arc::clone(&context.queue),
+            color_atlas_texture_format,
+        );
 
         *self = Self::new_internal(
             Some(gpu_context.clone()),
