@@ -5419,3 +5419,146 @@ mod property_test {
         }
     }
 }
+
+#[gpui::test]
+async fn test_archive_only_thread_in_worktree_switches_to_surviving_workspace(
+    cx: &mut TestAppContext,
+) {
+    // When the user archives the only thread in a linked-worktree workspace,
+    // the sidebar should switch to a surviving workspace (the main repo)
+    // instead of staying on the doomed worktree workspace.
+    agent_ui::test_support::init_test(cx);
+    cx.update(|cx| {
+        cx.update_flags(false, vec!["agent-v2".into()]);
+        ThreadStore::init_global(cx);
+        ThreadMetadataStore::init_global(cx);
+        language_model::LanguageModelRegistry::test(cx);
+        prompt_store::init(cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/project",
+        serde_json::json!({
+            ".git": {},
+            "src": {},
+        }),
+    )
+    .await;
+
+    fs.add_linked_worktree_for_repo(
+        Path::new("/project/.git"),
+        false,
+        git::repository::Worktree {
+            path: PathBuf::from("/wt-feature"),
+            ref_name: Some("refs/heads/feature".into()),
+            sha: "aaa".into(),
+            is_main: false,
+        },
+    )
+    .await;
+
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+
+    let main_project = project::Project::test(fs.clone(), ["/project".as_ref()], cx).await;
+    let worktree_project = project::Project::test(fs.clone(), ["/wt-feature".as_ref()], cx).await;
+
+    main_project
+        .update(cx, |p, cx| p.git_scans_complete(cx))
+        .await;
+    worktree_project
+        .update(cx, |p, cx| p.git_scans_complete(cx))
+        .await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
+
+    let worktree_workspace = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(worktree_project.clone(), window, cx)
+    });
+
+    // Activate the worktree workspace so the user is "looking at" it.
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.activate(worktree_workspace.clone(), window, cx);
+    });
+
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    let main_workspace = multi_workspace.read_with(cx, |mw, _| mw.workspaces()[0].clone());
+    let _main_panel = add_agent_panel(&main_workspace, cx);
+    let worktree_panel = add_agent_panel(&worktree_workspace, cx);
+
+    // Open a thread in the worktree workspace's panel.
+    open_thread_with_connection(&worktree_panel, StubAgentConnection::new(), cx);
+    send_message(&worktree_panel, cx);
+    let thread_session_id = active_session_id(&worktree_panel, cx);
+
+    // Save thread metadata associated with the worktree workspace.
+    save_thread_metadata(
+        thread_session_id.clone(),
+        "Worktree Thread".into(),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+        None,
+        &worktree_project,
+        cx,
+    );
+    cx.run_until_parked();
+
+    // Set the sidebar's active entry to this thread.
+    sidebar.update_in(cx, |sidebar, _window, cx| {
+        sidebar.active_entry = Some(ActiveEntry::Thread {
+            session_id: thread_session_id.clone(),
+            workspace: worktree_workspace.clone(),
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    // Verify the active workspace is the worktree workspace before archiving.
+    let active_before = multi_workspace.read_with(cx, |mw, _| mw.active_workspace_index());
+    let worktree_index = multi_workspace.read_with(cx, |mw, _| {
+        mw.workspaces()
+            .iter()
+            .position(|ws| ws == &worktree_workspace)
+            .unwrap()
+    });
+    assert_eq!(
+        active_before, worktree_index,
+        "before archiving, the worktree workspace should be active"
+    );
+
+    // Archive the thread.
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.archive_thread(&thread_session_id, window, cx);
+    });
+    cx.run_until_parked();
+
+    // After archiving, the active workspace should be the main workspace,
+    // not the doomed worktree workspace.
+    let active_after = multi_workspace.read_with(cx, |mw, _| mw.active_workspace_index());
+    let main_index = multi_workspace.read_with(cx, |mw, _| {
+        mw.workspaces()
+            .iter()
+            .position(|ws| ws == &main_workspace)
+            .unwrap()
+    });
+    assert_eq!(
+        active_after, main_index,
+        "after archiving, the sidebar should have switched to the main (surviving) workspace"
+    );
+
+    // The active entry should be a Draft on the main workspace, not the
+    // worktree workspace.
+    sidebar.read_with(cx, |sidebar, _| match &sidebar.active_entry {
+        Some(ActiveEntry::Draft(ws)) => {
+            assert_eq!(
+                ws, &main_workspace,
+                "active_entry should be Draft on the main workspace, not the worktree"
+            );
+        }
+        other => panic!(
+            "expected ActiveEntry::Draft on main workspace, got {:?}",
+            other
+        ),
+    });
+}

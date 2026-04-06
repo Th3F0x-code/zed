@@ -2458,7 +2458,7 @@ impl Sidebar {
         else {
             return;
         };
-        thread_worktree_archive::archive_thread(
+        let outcome = thread_worktree_archive::archive_thread(
             session_id,
             current_workspace,
             multi_workspace_handle,
@@ -2492,6 +2492,23 @@ impl Sidebar {
                         })?;
                 self.workspace_for_group(path_list, cx)
             });
+
+            // If the group's workspace is about to lose all its roots, find a
+            // surviving workspace in the same window instead.
+            let safe_workspace = if group_workspace
+                .as_ref()
+                .is_some_and(|ws| workspace_will_be_empty(ws, &outcome.roots_to_delete, cx))
+            {
+                self.multi_workspace.upgrade().and_then(|mw| {
+                    let mw = mw.read(cx);
+                    mw.workspaces()
+                        .iter()
+                        .find(|ws| !workspace_will_be_empty(ws, &outcome.roots_to_delete, cx))
+                        .cloned()
+                })
+            } else {
+                group_workspace.clone()
+            };
 
             let next_thread = current_pos.and_then(|pos| {
                 let group_start = self.contents.entries[..pos]
@@ -2534,10 +2551,21 @@ impl Sidebar {
                 // but belongs to its own workspace). Loading into the wrong panel binds
                 // the thread to the wrong project, which corrupts its stored folder_paths
                 // when metadata is saved via ThreadMetadata::from_thread.
-                let target_workspace = match &next.workspace {
+                let mut target_workspace = match &next.workspace {
                     ThreadEntryWorkspace::Open(ws) => Some(ws.clone()),
                     ThreadEntryWorkspace::Closed(_) => group_workspace,
                 };
+                // If the next thread's workspace is also being deleted, fall
+                // back to a surviving workspace.
+                if target_workspace
+                    .as_ref()
+                    .is_some_and(|ws| workspace_will_be_empty(ws, &outcome.roots_to_delete, cx))
+                {
+                    #[allow(clippy::redundant_clone)]
+                    {
+                        target_workspace = safe_workspace.clone();
+                    }
+                }
                 if let Some(ref ws) = target_workspace {
                     self.active_entry = Some(ActiveEntry::Thread {
                         session_id: next_metadata.session_id.clone(),
@@ -2562,8 +2590,14 @@ impl Sidebar {
                     }
                 }
             } else {
-                if let Some(workspace) = &group_workspace {
+                let fallback = safe_workspace.or(group_workspace);
+                if let Some(workspace) = &fallback {
                     self.active_entry = Some(ActiveEntry::Draft(workspace.clone()));
+                    if let Some(multi_workspace) = self.multi_workspace.upgrade() {
+                        multi_workspace.update(cx, |mw, cx| {
+                            mw.activate(workspace.clone(), window, cx);
+                        });
+                    }
                     if let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) {
                         agent_panel.update(cx, |panel, cx| {
                             panel.new_thread(&NewThread, window, cx);
@@ -3869,6 +3903,21 @@ impl Render for Sidebar {
             })
             .child(self.render_sidebar_bottom_bar(cx))
     }
+}
+
+fn workspace_will_be_empty(
+    workspace: &Entity<Workspace>,
+    roots_to_delete: &[PathBuf],
+    cx: &App,
+) -> bool {
+    if roots_to_delete.is_empty() {
+        return false;
+    }
+    let root_paths = workspace.read(cx).root_paths(cx);
+    !root_paths.is_empty()
+        && root_paths
+            .iter()
+            .all(|path| roots_to_delete.iter().any(|d| d.as_path() == path.as_ref()))
 }
 
 fn all_thread_infos_for_workspace(
