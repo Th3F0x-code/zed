@@ -610,8 +610,6 @@ impl GitRepository for FakeGitRepository {
                     let ref_name = format!("refs/heads/{branch_name}");
                     state.refs.insert(ref_name, sha);
                     state.branches.insert(branch_name);
-                } else {
-                    state.refs.insert("HEAD".into(), sha);
                 }
                 Ok::<(), anyhow::Error>(())
             })??;
