@@ -231,7 +231,7 @@ impl GitRepository for FakeGitRepository {
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         self.with_state_async(true, move |state| {
-            let pop_count = if commit == "HEAD~" {
+            let pop_count = if commit == "HEAD~" || commit == "HEAD^" {
                 1
             } else if let Some(suffix) = commit.strip_prefix("HEAD~") {
                 suffix
