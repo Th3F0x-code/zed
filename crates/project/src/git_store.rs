@@ -6118,21 +6118,6 @@ impl Repository {
         })
     }
 
-    pub fn stage_all_including_untracked(&mut self) -> oneshot::Receiver<Result<()>> {
-        self.send_job(None, move |repo, _cx| async move {
-            match repo {
-                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    backend.stage_all_including_untracked().await
-                }
-                RepositoryState::Remote(_) => {
-                    anyhow::bail!(
-                        "stage_all_including_untracked is not supported for remote repositories"
-                    )
-                }
-            }
-        })
-    }
-
     pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         self.send_job(
