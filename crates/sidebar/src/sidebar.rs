@@ -17,8 +17,8 @@ use chrono::{DateTime, Utc};
 use editor::Editor;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagViewExt as _};
 use gpui::{
-    Action as _, AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyContext, ListState,
-    Pixels, Render, SharedString, WeakEntity, Window, WindowHandle, linear_color_stop,
+    Action as _, AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, KeyContext,
+    ListState, Pixels, Render, SharedString, WeakEntity, Window, WindowHandle, linear_color_stop,
     linear_gradient, list, prelude::*, px,
 };
 use menu::{
@@ -373,6 +373,7 @@ pub struct Sidebar {
     recent_projects_popover_handle: PopoverMenuHandle<SidebarRecentProjects>,
     project_header_menu_ix: Option<usize>,
     _subscriptions: Vec<gpui::Subscription>,
+    pending_worktree_restores: HashSet<acp::SessionId>,
     _draft_observation: Option<gpui::Subscription>,
 }
 
@@ -464,6 +465,7 @@ impl Sidebar {
             recent_projects_popover_handle: PopoverMenuHandle::default(),
             project_header_menu_ix: None,
             _subscriptions: Vec::new(),
+            pending_worktree_restores: HashSet::default(),
             _draft_observation: None,
         }
     }
@@ -2211,9 +2213,6 @@ impl Sidebar {
         cx.spawn_in(window, async move |this, cx| {
             let archived_worktrees = task.await?;
 
-            // No archived worktrees means the thread wasn't associated with a
-            // linked worktree that got deleted, so we just need to find (or
-            // open) a workspace that matches the thread's folder paths.
             if archived_worktrees.is_empty() {
                 this.update_in(cx, |this, window, cx| {
                     if let Some(workspace) =
@@ -2236,23 +2235,26 @@ impl Sidebar {
                 return anyhow::Ok(());
             }
 
-            // Restore each archived worktree back to disk via git. If the
-            // worktree already exists (e.g. a previous unarchive of a different
-            // thread on the same worktree already restored it), it's reused
-            // as-is. We track (old_path, restored_path) pairs so we can update
-            // the thread's folder_paths afterward.
+            this.update_in(cx, |this, _window, cx| {
+                this.pending_worktree_restores.insert(session_id.clone());
+                cx.notify();
+            })?;
+
             let mut path_replacements: Vec<(PathBuf, PathBuf)> = Vec::new();
             for row in &archived_worktrees {
                 match thread_worktree_archive::restore_worktree_via_git(row, &mut *cx).await {
                     Ok(restored_path) => {
-                        // The worktree is on disk now; clean up the DB record
-                        // and git ref we created during archival.
                         thread_worktree_archive::cleanup_archived_worktree_record(row, &mut *cx)
                             .await;
                         path_replacements.push((row.worktree_path.clone(), restored_path));
                     }
                     Err(error) => {
                         log::error!("Failed to restore worktree: {error:#}");
+                        this.update_in(cx, |this, _window, cx| {
+                            this.pending_worktree_restores.remove(&session_id);
+                            cx.notify();
+                        })
+                        .ok();
                         this.update_in(cx, |this, _window, cx| {
                             if let Some(multi_workspace) = this.multi_workspace.upgrade() {
                                 let workspace = multi_workspace.read(cx).workspace().clone();
@@ -2275,18 +2277,19 @@ impl Sidebar {
                 }
             }
 
+            this.update_in(cx, |this, _window, cx| {
+                this.pending_worktree_restores.remove(&session_id);
+                cx.notify();
+            })
+            .ok();
+
             if !path_replacements.is_empty() {
-                // Update the thread's stored folder_paths: swap each old
-                // worktree path for the restored path (which may differ if
-                // the worktree was restored to a new location).
                 cx.update(|_window, cx| {
                     store.update(cx, |store, cx| {
                         store.complete_worktree_restore(&session_id, &path_replacements, cx);
                     });
                 })?;
 
-                // Re-read the metadata (now with updated paths) and open
-                // the workspace so the user lands in the restored worktree.
                 let updated_metadata =
                     cx.update(|_window, cx| store.read(cx).entry(&session_id).cloned())?;
 
@@ -2922,6 +2925,23 @@ impl Sidebar {
                         highlight_positions: wt.highlight_positions.clone(),
                     })
                     .collect(),
+            )
+            .pending_worktree_restore(
+                self.pending_worktree_restores
+                    .contains(&thread.metadata.session_id),
+            )
+            .when(
+                self.pending_worktree_restores
+                    .contains(&thread.metadata.session_id),
+                |this| {
+                    let session_id = thread.metadata.session_id.clone();
+                    this.on_cancel_restore(cx.listener(
+                        move |this, _event: &ClickEvent, _window, cx| {
+                            this.pending_worktree_restores.remove(&session_id);
+                            cx.notify();
+                        },
+                    ))
+                },
             )
             .timestamp(timestamp)
             .highlight_positions(thread.highlight_positions.to_vec())
