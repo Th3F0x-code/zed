@@ -65,6 +65,7 @@ tiktoken-rs.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 ui.workspace = true
 ui_input.workspace = true
+url.workspace = true
 util.workspace = true
 vercel = { workspace = true, features = ["schemars"] }
 x_ai = { workspace = true, features = ["schemars"] }

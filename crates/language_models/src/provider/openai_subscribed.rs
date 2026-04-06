@@ -19,6 +19,7 @@ use smol::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ui::{ConfiguredApiCard, prelude::*};
+use url::form_urlencoded;
 use util::ResultExt as _;
 
 use crate::provider::open_ai::{OpenAiResponseEventMapper, into_open_ai_response};
@@ -749,10 +750,13 @@ async fn exchange_code(
     code: &str,
     verifier: &str,
 ) -> Result<TokenResponse> {
-    let body = format!(
-        "grant_type=authorization_code&client_id={CLIENT_ID}&code={code}&redirect_uri={encoded_redirect}&code_verifier={verifier}",
-        encoded_redirect = percent_encode(REDIRECT_URI),
-    );
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("client_id", CLIENT_ID)
+        .append_pair("code", code)
+        .append_pair("redirect_uri", REDIRECT_URI)
+        .append_pair("code_verifier", verifier)
+        .finish();
 
     let request = HttpRequest::builder()
         .method(Method::POST)
@@ -778,8 +782,11 @@ async fn refresh_token(
     client: &Arc<dyn HttpClient>,
     refresh_token: &str,
 ) -> Result<CodexCredentials> {
-    let body =
-        format!("grant_type=refresh_token&client_id={CLIENT_ID}&refresh_token={refresh_token}");
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("client_id", CLIENT_ID)
+        .append_pair("refresh_token", refresh_token)
+        .finish();
 
     let request = HttpRequest::builder()
         .method(Method::POST)
