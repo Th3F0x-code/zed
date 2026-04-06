@@ -191,6 +191,7 @@ impl OpenAiSubscribedProvider {
                 .log_err();
             state.update(cx, |s, cx| {
                 s.credentials = None;
+                s.sign_in_task = None;
                 cx.notify();
             })?;
             anyhow::Ok(())
