@@ -584,12 +584,20 @@ async fn do_oauth_flow(
     rand::rng().fill_bytes(&mut state_bytes);
     let oauth_state: String = state_bytes.iter().map(|b| format!("{b:02x}")).collect();
 
-    let auth_url = format!(
-        "{OPENAI_AUTHORIZE_URL}?client_id={CLIENT_ID}&redirect_uri={encoded_redirect}&scope=openid+profile+email+offline_access&response_type=code&code_challenge={challenge}&code_challenge_method=S256&state={oauth_state}&codex_cli_simplified_flow=true&originator=zed",
-        encoded_redirect = percent_encode(REDIRECT_URI),
-    );
+    let mut auth_url = url::Url::parse(OPENAI_AUTHORIZE_URL).expect("valid base URL");
+    auth_url
+        .query_pairs_mut()
+        .append_pair("client_id", CLIENT_ID)
+        .append_pair("redirect_uri", REDIRECT_URI)
+        .append_pair("scope", "openid profile email offline_access")
+        .append_pair("response_type", "code")
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &oauth_state)
+        .append_pair("codex_cli_simplified_flow", "true")
+        .append_pair("originator", "zed");
 
-    cx.update(|cx| cx.open_url(&auth_url));
+    cx.update(|cx| cx.open_url(auth_url.as_str()));
 
     let code = await_oauth_callback(&oauth_state)
         .await
@@ -650,11 +658,11 @@ async fn await_oauth_callback(expected_state: &str) -> Result<String> {
     let query = path.split('?').nth(1).unwrap_or("");
     let mut code: Option<String> = None;
     let mut received_state: Option<String> = None;
-    for part in query.split('&') {
-        if let Some(v) = part.strip_prefix("code=") {
-            code = Some(percent_decode(v));
-        } else if let Some(v) = part.strip_prefix("state=") {
-            received_state = Some(percent_decode(v));
+    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => received_state = Some(value.into_owned()),
+            _ => {}
         }
     }
 
@@ -809,42 +817,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            b => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-fn percent_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut bytes = s.bytes().peekable();
-    while let Some(b) = bytes.next() {
-        if b == b'%' {
-            let h1 = bytes.next().unwrap_or(b'0');
-            let h2 = bytes.next().unwrap_or(b'0');
-            let hex = [h1, h2];
-            if let Ok(hex_str) = std::str::from_utf8(&hex) {
-                if let Ok(decoded) = u8::from_str_radix(hex_str, 16) {
-                    result.push(decoded as char);
-                    continue;
-                }
-            }
-        } else if b == b'+' {
-            result.push(' ');
-            continue;
-        }
-        result.push(b as char);
-    }
-    result
 }
 
 fn do_sign_in(state: &Entity<State>, http_client: &Arc<dyn HttpClient>, cx: &mut App) {
