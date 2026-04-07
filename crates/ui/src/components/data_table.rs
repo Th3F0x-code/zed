@@ -1025,7 +1025,7 @@ impl RenderOnce for Table {
                     .custom_scrollbar
                     .clone()
                     .unwrap_or_else(|| Scrollbars::new(ScrollAxes::Both));
-                let outer = if let Some(list_state) = variable_list_state {
+                let mut outer = if let Some(list_state) = variable_list_state {
                     outer.custom_scrollbars(
                         scrollbars.tracked_scroll_handle(&list_state),
                         window,
@@ -1038,6 +1038,10 @@ impl RenderOnce for Table {
                         cx,
                     )
                 };
+                // Prevent horizontal scroll events from being routed to the vertical axis
+                // (the overflow_x_scroll added by custom_scrollbars for the H scrollbar would
+                // otherwise trigger the fallback delta_y = delta.x when overflow.y != Scroll).
+                outer.style().restrict_scroll_to_axis = Some(true);
 
                 if let Some(interaction_state) = interaction_state.as_ref() {
                     outer
@@ -1056,7 +1060,7 @@ impl RenderOnce for Table {
                 .custom_scrollbar
                 .clone()
                 .unwrap_or_else(|| Scrollbars::new(ScrollAxes::Both));
-            let table_with_scrollbar = if let Some(list_state) = variable_list_state {
+            let mut table_with_scrollbar = if let Some(list_state) = variable_list_state {
                 table.custom_scrollbars(scrollbars.tracked_scroll_handle(&list_state), window, cx)
             } else {
                 table.custom_scrollbars(
@@ -1065,6 +1069,8 @@ impl RenderOnce for Table {
                     cx,
                 )
             };
+            // Prevent horizontal events from routing into the vertical scroll axis via fallback.
+            table_with_scrollbar.style().restrict_scroll_to_axis = Some(true);
             table_with_scrollbar
                 .track_focus(&interaction_state.read(cx).focus_handle)
                 .id(("table", interaction_state.entity_id()))
