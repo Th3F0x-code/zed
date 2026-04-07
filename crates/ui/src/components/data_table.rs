@@ -979,32 +979,7 @@ impl RenderOnce for Table {
                     })
                     .when_some(resize_handles, |parent, handles| parent.child(handles));
 
-                if let Some(state) = interaction_state.as_ref() {
-                    let scrollbars = state
-                        .read(cx)
-                        .custom_scrollbar
-                        .clone()
-                        .unwrap_or_else(|| Scrollbars::new(ScrollAxes::Both));
-                    if let Some(list_state) = variable_list_state {
-                        content
-                            .custom_scrollbars(
-                                scrollbars.tracked_scroll_handle(&list_state),
-                                window,
-                                cx,
-                            )
-                            .into_any_element()
-                    } else {
-                        content
-                            .custom_scrollbars(
-                                scrollbars.tracked_scroll_handle(&state.read(cx).scroll_handle),
-                                window,
-                                cx,
-                            )
-                            .into_any_element()
-                    }
-                } else {
-                    content.into_any_element()
-                }
+                content.into_any_element()
             })
             .when_some(
                 no_rows_rendered
@@ -1027,13 +1002,14 @@ impl RenderOnce for Table {
 
         if is_resizable {
             if let Some(state) = interaction_state.as_ref() {
-                let h_scroll_container = div()
+                let mut h_scroll_container = div()
                     .id("table-h-scroll")
                     .overflow_x_scroll()
                     .flex_grow()
                     .h_full()
                     .track_scroll(&state.read(cx).horizontal_scroll_handle)
                     .child(table);
+                h_scroll_container.style().restrict_scroll_to_axis = Some(true);
 
                 let outer = table_wrapper
                     .child(h_scroll_container)
@@ -1043,6 +1019,25 @@ impl RenderOnce for Table {
                         window,
                         cx,
                     );
+
+                let scrollbars = state
+                    .read(cx)
+                    .custom_scrollbar
+                    .clone()
+                    .unwrap_or_else(|| Scrollbars::new(ScrollAxes::Both));
+                let outer = if let Some(list_state) = variable_list_state {
+                    outer.custom_scrollbars(
+                        scrollbars.tracked_scroll_handle(&list_state),
+                        window,
+                        cx,
+                    )
+                } else {
+                    outer.custom_scrollbars(
+                        scrollbars.tracked_scroll_handle(&state.read(cx).scroll_handle),
+                        window,
+                        cx,
+                    )
+                };
 
                 if let Some(interaction_state) = interaction_state.as_ref() {
                     outer
@@ -1056,7 +1051,21 @@ impl RenderOnce for Table {
                 table.into_any_element()
             }
         } else if let Some(interaction_state) = interaction_state.as_ref() {
-            table
+            let scrollbars = interaction_state
+                .read(cx)
+                .custom_scrollbar
+                .clone()
+                .unwrap_or_else(|| Scrollbars::new(ScrollAxes::Both));
+            let table_with_scrollbar = if let Some(list_state) = variable_list_state {
+                table.custom_scrollbars(scrollbars.tracked_scroll_handle(&list_state), window, cx)
+            } else {
+                table.custom_scrollbars(
+                    scrollbars.tracked_scroll_handle(&interaction_state.read(cx).scroll_handle),
+                    window,
+                    cx,
+                )
+            };
+            table_with_scrollbar
                 .track_focus(&interaction_state.read(cx).focus_handle)
                 .id(("table", interaction_state.entity_id()))
                 .into_any_element()
