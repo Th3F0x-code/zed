@@ -396,22 +396,6 @@ pub struct CommitDetails {
     pub author_name: SharedString,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct FileHistoryEntry {
-    pub sha: SharedString,
-    pub subject: SharedString,
-    pub message: SharedString,
-    pub commit_timestamp: i64,
-    pub author_name: SharedString,
-    pub author_email: SharedString,
-}
-
-#[derive(Debug, Clone)]
-pub struct FileHistory {
-    pub entries: Vec<FileHistoryEntry>,
-    pub path: RepoPath,
-}
-
 #[derive(Debug)]
 pub struct CommitDiff {
     pub files: Vec<CommitFile>,
@@ -751,13 +735,6 @@ pub trait GitRepository: Send + Sync {
         content: Rope,
         line_ending: LineEnding,
     ) -> BoxFuture<'_, Result<crate::blame::Blame>>;
-    fn file_history(&self, path: RepoPath) -> BoxFuture<'_, Result<FileHistory>>;
-    fn file_history_paginated(
-        &self,
-        path: RepoPath,
-        skip: usize,
-        limit: Option<usize>,
-    ) -> BoxFuture<'_, Result<FileHistory>>;
 
     /// Returns the absolute path to the repository. For worktrees, this will be the path to the
     /// worktree's gitdir within the main repository (typically `.git/worktrees/<name>`).
@@ -1842,92 +1819,6 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 crate::blame::Blame::for_path(&git?, &path, &content, line_ending).await
-            })
-            .boxed()
-    }
-
-    fn file_history(&self, path: RepoPath) -> BoxFuture<'_, Result<FileHistory>> {
-        self.file_history_paginated(path, 0, None)
-    }
-
-    fn file_history_paginated(
-        &self,
-        path: RepoPath,
-        skip: usize,
-        limit: Option<usize>,
-    ) -> BoxFuture<'_, Result<FileHistory>> {
-        let git_binary = self.git_binary();
-        self.executor
-            .spawn(async move {
-                let git = git_binary?;
-                // Use a unique delimiter with a hardcoded UUID to separate commits
-                // This essentially eliminates any chance of encountering the delimiter in actual commit data
-                let commit_delimiter =
-                    concat!("<<COMMIT_END-", "3f8a9c2e-7d4b-4e1a-9f6c-8b5d2a1e4c3f>>",);
-
-                let format_string = format!(
-                    "--pretty=format:%H%x00%s%x00%B%x00%at%x00%an%x00%ae{}",
-                    commit_delimiter
-                );
-
-                let mut args = vec!["log", "--follow", &format_string];
-
-                let skip_str;
-                let limit_str;
-                if skip > 0 {
-                    skip_str = skip.to_string();
-                    args.push("--skip");
-                    args.push(&skip_str);
-                }
-                if let Some(n) = limit {
-                    limit_str = n.to_string();
-                    args.push("-n");
-                    args.push(&limit_str);
-                }
-
-                args.push("--");
-
-                let output = git
-                    .build_command(&args)
-                    .arg(path.as_unix_str())
-                    .output()
-                    .await?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    bail!("git log failed: {stderr}");
-                }
-
-                let stdout = std::str::from_utf8(&output.stdout)?;
-                let mut entries = Vec::new();
-
-                for commit_block in stdout.split(commit_delimiter) {
-                    let commit_block = commit_block.trim();
-                    if commit_block.is_empty() {
-                        continue;
-                    }
-
-                    let fields: Vec<&str> = commit_block.split('\0').collect();
-                    if fields.len() >= 6 {
-                        let sha = fields[0].trim().to_string().into();
-                        let subject = fields[1].trim().to_string().into();
-                        let message = fields[2].trim().to_string().into();
-                        let commit_timestamp = fields[3].trim().parse().unwrap_or(0);
-                        let author_name = fields[4].trim().to_string().into();
-                        let author_email = fields[5].trim().to_string().into();
-
-                        entries.push(FileHistoryEntry {
-                            sha,
-                            subject,
-                            message,
-                            commit_timestamp,
-                            author_name,
-                            author_email,
-                        });
-                    }
-                }
-
-                Ok(FileHistory { entries, path })
             })
             .boxed()
     }
