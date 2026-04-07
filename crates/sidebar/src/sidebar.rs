@@ -3823,27 +3823,6 @@ impl WorkspaceSidebar for Sidebar {
         cx.notify();
     }
 
-    fn toggle_thread_switcher(
-        &mut self,
-        select_last: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_thread_switcher_impl(select_last, window, cx);
-    }
-
-    fn cycle_project(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.cycle_project_impl(forward, window, cx);
-    }
-
-    fn cycle_thread(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.cycle_thread_impl(forward, window, cx);
-    }
-
-    fn move_workspace_to_new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.on_move_workspace_to_new_window(&MoveWorkspaceToNewWindow, window, cx);
-    }
-
     fn serialized_state(&self, _cx: &App) -> Option<String> {
         let serialized = SerializedSidebar {
             width: Some(f32::from(self.width)),
