@@ -1011,16 +1011,22 @@ impl GitGraph {
     }
 
     fn preview_column_fractions(&self, window: &Window, cx: &App) -> [f32; 5] {
+        // todo(git_graph): We should make a column/table api that allows removing table columns
         let fractions = self
             .column_widths
             .read(cx)
             .preview_fractions(window.rem_size());
+
+        let is_file_history = matches!(self.log_source, LogSource::File(_));
+        let graph_fraction = if is_file_history { 0.0 } else { fractions[0] };
+        let offset = if is_file_history { 0 } else { 1 };
+
         [
-            fractions[0],
-            fractions[1],
-            fractions[2],
-            fractions[3],
-            fractions[4],
+            graph_fraction,
+            fractions[offset + 0],
+            fractions[offset + 1],
+            fractions[offset + 2],
+            fractions[offset + 3],
         ]
     }
 
@@ -1090,25 +1096,46 @@ impl GitGraph {
         });
 
         let table_interaction_state = cx.new(|cx| TableInteractionState::new(cx));
-        let column_widths = cx.new(|_cx| {
-            RedistributableColumnsState::new(
-                5,
-                vec![
-                    DefiniteLength::Fraction(0.14),
-                    DefiniteLength::Fraction(0.6192),
-                    DefiniteLength::Fraction(0.1032),
-                    DefiniteLength::Fraction(0.086),
-                    DefiniteLength::Fraction(0.0516),
-                ],
-                vec![
-                    TableResizeBehavior::Resizable,
-                    TableResizeBehavior::Resizable,
-                    TableResizeBehavior::Resizable,
-                    TableResizeBehavior::Resizable,
-                    TableResizeBehavior::Resizable,
-                ],
-            )
-        });
+
+        let column_widths = if matches!(log_source, LogSource::File(_)) {
+            cx.new(|_cx| {
+                RedistributableColumnsState::new(
+                    4,
+                    vec![
+                        DefiniteLength::Fraction(0.6192),
+                        DefiniteLength::Fraction(0.1032),
+                        DefiniteLength::Fraction(0.086),
+                        DefiniteLength::Fraction(0.0516),
+                    ],
+                    vec![
+                        TableResizeBehavior::Resizable,
+                        TableResizeBehavior::Resizable,
+                        TableResizeBehavior::Resizable,
+                        TableResizeBehavior::Resizable,
+                    ],
+                )
+            })
+        } else {
+            cx.new(|_cx| {
+                RedistributableColumnsState::new(
+                    5,
+                    vec![
+                        DefiniteLength::Fraction(0.14),
+                        DefiniteLength::Fraction(0.6192),
+                        DefiniteLength::Fraction(0.1032),
+                        DefiniteLength::Fraction(0.086),
+                        DefiniteLength::Fraction(0.0516),
+                    ],
+                    vec![
+                        TableResizeBehavior::Resizable,
+                        TableResizeBehavior::Resizable,
+                        TableResizeBehavior::Resizable,
+                        TableResizeBehavior::Resizable,
+                        TableResizeBehavior::Resizable,
+                    ],
+                )
+            })
+        };
         let mut row_height = Self::row_height(cx);
 
         cx.observe_global_in::<settings::SettingsStore>(window, move |this, _window, cx| {
@@ -2195,7 +2222,7 @@ impl GitGraph {
             .into_any_element()
     }
 
-    pub fn render_graph(&self, window: &Window, cx: &mut Context<GitGraph>) -> impl IntoElement {
+    fn render_graph_canvas(&self, window: &Window, cx: &mut Context<GitGraph>) -> impl IntoElement {
         let row_height = self.row_height;
         let table_state = self.table_interaction_state.read(cx);
         let viewport_height = table_state
@@ -2640,6 +2667,7 @@ impl Render for GitGraph {
                     this.child(self.render_loading_spinner(cx))
                 })
         } else {
+            let is_file_history = matches!(self.log_source, LogSource::File(_));
             let header_resize_info = HeaderResizeInfo::from_state(&self.column_widths, cx);
             let header_context = TableRenderContext::for_column_widths(
                 Some(self.column_widths.read(cx).widths_to_render()),
@@ -2666,6 +2694,9 @@ impl Render for GitGraph {
                         .flex()
                         .flex_col()
                         .child(render_table_header(
+
+                            if !is_file_history {
+
                             TableRow::from_vec(
                                 vec![
                                     Label::new("Graph")
@@ -2680,7 +2711,22 @@ impl Render for GitGraph {
                                     Label::new("Commit").color(Color::Muted).into_any_element(),
                                 ],
                                 5,
-                            ),
+                            )
+                                } else {
+                                    TableRow::from_vec(
+                                        vec![
+                                            Label::new("Description")
+                                                .color(Color::Muted)
+                                                .into_any_element(),
+                                            Label::new("Date").color(Color::Muted).into_any_element(),
+                                            Label::new("Author").color(Color::Muted).into_any_element(),
+                                            Label::new("Commit").color(Color::Muted).into_any_element(),
+                                        ],
+                                        4,
+                                    )
+
+                                },
+
                             header_context,
                             Some(header_resize_info),
                             Some(self.column_widths.entity_id()),
@@ -2702,41 +2748,43 @@ impl Render for GitGraph {
                                     .child(
                                         h_flex()
                                             .size_full()
-                                            .child(
-                                                div()
-                                                    .w(DefiniteLength::Fraction(graph_fraction))
-                                                    .h_full()
-                                                    .min_w_0()
-                                                    .overflow_hidden()
-                                                    .child(
-                                                        div()
-                                                            .id("graph-canvas")
-                                                            .size_full()
-                                                            .overflow_hidden()
-                                                            .child(
-                                                                div()
-                                                                    .size_full()
-                                                                    .child(self.render_graph(window, cx)),
-                                                            )
-                                                            .on_scroll_wheel(
-                                                                cx.listener(Self::handle_graph_scroll),
-                                                            )
-                                                            .on_mouse_move(
-                                                                cx.listener(Self::handle_graph_mouse_move),
-                                                            )
-                                                            .on_click(cx.listener(Self::handle_graph_click))
-                                                            .on_hover(cx.listener(
-                                                                |this, &is_hovered: &bool, _, cx| {
-                                                                    if !is_hovered
-                                                                        && this.hovered_entry_idx.is_some()
-                                                                    {
-                                                                        this.hovered_entry_idx = None;
-                                                                        cx.notify();
-                                                                    }
-                                                                },
-                                                            )),
-                                                    ),
-                                            )
+                                            .when(!is_file_history, |this| {
+                                                this.child(
+                                                    div()
+                                                        .w(DefiniteLength::Fraction(graph_fraction))
+                                                        .h_full()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .child(
+                                                            div()
+                                                                .id("graph-canvas")
+                                                                .size_full()
+                                                                .overflow_hidden()
+                                                                .child(
+                                                                    div()
+                                                                        .size_full()
+                                                                        .child(self.render_graph_canvas(window, cx)),
+                                                                )
+                                                                .on_scroll_wheel(
+                                                                    cx.listener(Self::handle_graph_scroll),
+                                                                )
+                                                                .on_mouse_move(
+                                                                    cx.listener(Self::handle_graph_mouse_move),
+                                                                )
+                                                                .on_click(cx.listener(Self::handle_graph_click))
+                                                                .on_hover(cx.listener(
+                                                                    |this, &is_hovered: &bool, _, cx| {
+                                                                        if !is_hovered
+                                                                            && this.hovered_entry_idx.is_some()
+                                                                        {
+                                                                            this.hovered_entry_idx = None;
+                                                                            cx.notify();
+                                                                        }
+                                                                    },
+                                                                )),
+                                                        ),
+                                                )
+                                            })
                                             .child(
                                                 div()
                                                     .w(DefiniteLength::Fraction(table_fraction))
