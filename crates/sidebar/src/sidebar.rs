@@ -3084,12 +3084,7 @@ impl Sidebar {
         Some(mw.workspace().read(cx).project_group_key(cx))
     }
 
-    fn cycle_project_impl(
-        &mut self,
-        forward: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn cycle_project_impl(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(multi_workspace) = self.multi_workspace.upgrade() else {
             return;
         };
@@ -3134,12 +3129,7 @@ impl Sidebar {
         }
     }
 
-    fn on_next_project(
-        &mut self,
-        _: &NextProject,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_next_project(&mut self, _: &NextProject, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle_project_impl(true, window, cx);
     }
 
