@@ -6066,26 +6066,11 @@ impl ProjectGroupKey {
         Self { paths, host }
     }
 
-    pub fn display_name(&self) -> SharedString {
-        let mut names = Vec::with_capacity(self.paths.paths().len());
-        for abs_path in self.paths.paths() {
-            if let Some(name) = abs_path.file_name() {
-                names.push(name.to_string_lossy().to_string());
-            }
-        }
-        if names.is_empty() {
-            // TODO: Can we do something better in this case?
-            "Empty Workspace".into()
-        } else {
-            names.join(", ").into()
-        }
-    }
-
     pub fn path_list(&self) -> &PathList {
         &self.paths
     }
 
-    pub fn display_name_from_suffixes(
+    pub fn display_name(
         &self,
         path_detail_map: &std::collections::HashMap<PathBuf, usize>,
     ) -> SharedString {
@@ -6110,15 +6095,17 @@ impl ProjectGroupKey {
 }
 
 pub fn path_suffix(path: &Path, detail: usize) -> String {
-    let components: Vec<_> = path
+    let mut components: Vec<_> = path
         .components()
+        .rev()
         .filter_map(|component| match component {
             std::path::Component::Normal(s) => Some(s.to_string_lossy()),
             _ => None,
         })
+        .take(detail + 1)
         .collect();
-    let start = components.len().saturating_sub(detail + 1);
-    components[start..].join("/")
+    components.reverse();
+    components.join("/")
 }
 
 pub struct PathMatchCandidateSet {

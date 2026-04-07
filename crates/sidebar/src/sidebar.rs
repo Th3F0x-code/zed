@@ -817,7 +817,7 @@ impl Sidebar {
                 continue;
             }
 
-            let label = group_key.display_name_from_suffixes(&path_detail_map);
+            let label = group_key.display_name(&path_detail_map);
 
             let is_collapsed = self.collapsed_groups.contains(&path_list);
             let should_load_threads = !is_collapsed || !query.is_empty();
