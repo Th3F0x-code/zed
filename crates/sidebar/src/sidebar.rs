@@ -3084,19 +3084,6 @@ impl Sidebar {
         Some(mw.workspace().read(cx).project_group_key(cx))
     }
 
-    fn active_project_header_position(&self, cx: &App) -> Option<usize> {
-        let active_key = self.active_project_group_key(cx)?;
-        self.contents
-            .project_header_indices
-            .iter()
-            .position(|&entry_ix| {
-                matches!(
-                    &self.contents.entries[entry_ix],
-                    ListEntry::ProjectHeader { key, .. } if *key == active_key
-                )
-            })
-    }
-
     fn cycle_project_group_impl(
         &mut self,
         forward: bool,
@@ -3107,30 +3094,32 @@ impl Sidebar {
             return;
         };
 
-        let header_count = self.contents.project_header_indices.len();
-        if header_count == 0 {
+        let keys: Vec<ProjectGroupKey> = multi_workspace
+            .read(cx)
+            .project_group_keys()
+            .cloned()
+            .collect();
+        if keys.is_empty() {
             return;
         }
 
-        let current_pos = self.active_project_header_position(cx);
+        let active_key = self.active_project_group_key(cx);
+        let current_pos = active_key
+            .as_ref()
+            .and_then(|active| keys.iter().position(|k| k == active));
 
         let next_pos = match current_pos {
             Some(pos) => {
                 if forward {
-                    (pos + 1) % header_count
+                    (pos + 1) % keys.len()
                 } else {
-                    (pos + header_count - 1) % header_count
+                    (pos + keys.len() - 1) % keys.len()
                 }
             }
             None => 0,
         };
 
-        let header_entry_ix = self.contents.project_header_indices[next_pos];
-        let Some(ListEntry::ProjectHeader { key, .. }) = self.contents.entries.get(header_entry_ix)
-        else {
-            return;
-        };
-        let path_list = key.path_list().clone();
+        let path_list = keys[next_pos].path_list().clone();
 
         // Uncollapse the target group so that threads become visible.
         self.collapsed_groups.remove(&path_list);
