@@ -1,7 +1,5 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
-use std::path::PathBuf;
 use std::process::Command;
-use std::str::FromStr;
 
 fn main() {
     #[cfg(target_os = "linux")]
@@ -204,8 +202,18 @@ fn main() {
             }
         }
 
+        let release_channel = option_env!("RELEASE_CHANNEL").unwrap_or("dev");
+        let icon = match release_channel {
+            "stable" => "resources/windows/app-icon.ico",
+            "preview" => "resources/windows/app-icon-preview.ico",
+            "nightly" => "resources/windows/app-icon-nightly.ico",
+            "dev" => "resources/windows/app-icon-dev.ico",
+            _ => "resources/windows/app-icon-dev.ico",
+        };
+        let icon = std::path::Path::new(icon);
+
         println!("cargo:rerun-if-env-changed=RELEASE_CHANNEL");
-        println!("cargo:rerun-if-changed={}", icon_path().display());
+        println!("cargo:rerun-if-changed={}", icon.display());
 
         #[cfg(windows)]
         {
@@ -217,7 +225,7 @@ fn main() {
             if let Some(explicit_rc_toolkit_path) = std::env::var("ZED_RC_TOOLKIT_PATH").ok() {
                 res.set_toolkit_path(explicit_rc_toolkit_path.as_str());
             }
-            res.set_icon(icon_path().to_str().unwrap());
+            res.set_icon(icon.to_str().unwrap());
             res.set("FileDescription", "Zed");
             res.set("ProductName", "Zed");
 
@@ -232,7 +240,10 @@ fn main() {
     prepare_app_icon_x11();
 }
 
-fn icon_path() -> PathBuf {
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn icon_path() -> std::path::PathBuf {
+    use std::str::FromStr;
+
     let release_channel = option_env!("RELEASE_CHANNEL").unwrap_or("dev");
     let channel = match release_channel {
         "stable" => "",
@@ -247,7 +258,7 @@ fn icon_path() -> PathBuf {
     #[cfg(not(windows))]
     let icon = format!("resources/app-icon{}.png", channel);
 
-    PathBuf::from_str(&icon).unwrap()
+    std::path::PathBuf::from_str(&icon).unwrap()
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
