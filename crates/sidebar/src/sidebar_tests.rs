@@ -995,7 +995,7 @@ async fn test_keyboard_focus_in_does_not_set_selection(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-async fn test_keyboard_confirm_on_project_header_toggles_collapse(cx: &mut TestAppContext) {
+async fn test_keyboard_confirm_on_project_header_opens_workspace(cx: &mut TestAppContext) {
     let project = init_test_project("/my-project", cx).await;
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -1016,22 +1016,13 @@ async fn test_keyboard_confirm_on_project_header_toggles_collapse(cx: &mut TestA
         sidebar.selection = Some(0);
     });
 
-    // Confirm on project header collapses the group
+    // Confirm on project header activates the workspace (does not collapse)
     cx.dispatch_action(Confirm);
     cx.run_until_parked();
 
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
-        vec!["> [my-project]  <== selected"]
-    );
-
-    // Confirm again expands the group
-    cx.dispatch_action(Confirm);
-    cx.run_until_parked();
-
-    assert_eq!(
-        visible_entries_as_strings(&sidebar, cx),
-        vec!["v [my-project]  <== selected", "  Thread 1",]
+        vec!["v [my-project]  <== selected", "  Thread 1"]
     );
 }
 

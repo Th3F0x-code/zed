@@ -676,7 +676,7 @@ impl Sidebar {
             .cloned()
     }
 
-    /// Opens a new workspace for a group that has no open workspaces.
+    /// Finds or creates the main workspace for a project group and activates it.
     fn open_workspace_for_group(
         &mut self,
         path_list: &PathList,
@@ -687,11 +687,23 @@ impl Sidebar {
             return;
         };
 
-        multi_workspace
-            .update(cx, |this, cx| {
-                this.find_or_create_local_workspace(path_list.clone(), window, cx)
-            })
-            .detach_and_log_err(cx);
+        let open_task = multi_workspace.update(cx, |this, cx| {
+            this.find_or_create_local_workspace(path_list.clone(), window, cx)
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let workspace = open_task.await?;
+            this.update_in(cx, |this, _window, cx| {
+                this.active_entry = Some(ActiveEntry::Draft(workspace.clone()));
+                if AgentPanel::is_visible(&workspace, cx) {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.focus_panel::<AgentPanel>(_window, cx);
+                    });
+                }
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     /// Rebuilds the sidebar contents from current workspace and thread state.
@@ -1388,7 +1400,7 @@ impl Sidebar {
             .justify_between()
             .child(
                 h_flex()
-                    .when(!is_active, |this| this.cursor_pointer())
+                    .cursor_pointer()
                     .relative()
                     .min_w_0()
                     .w_full()
@@ -1493,28 +1505,14 @@ impl Sidebar {
                         },
                     ),
             )
-            .when(!is_active, |this| {
+            .cursor_pointer()
+            .hover(|s| s.bg(hover_color))
+            .tooltip(Tooltip::text("Open Workspace"))
+            .on_click({
                 let path_list = path_list.clone();
-                this.cursor_pointer()
-                    .hover(|s| s.bg(hover_color))
-                    .tooltip(Tooltip::text("Open Workspace"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(workspace) = this.workspace_for_group(&path_list, cx) {
-                            this.active_entry = Some(ActiveEntry::Draft(workspace.clone()));
-                            if let Some(multi_workspace) = this.multi_workspace.upgrade() {
-                                multi_workspace.update(cx, |multi_workspace, cx| {
-                                    multi_workspace.activate(workspace.clone(), window, cx);
-                                });
-                            }
-                            if AgentPanel::is_visible(&workspace, cx) {
-                                workspace.update(cx, |workspace, cx| {
-                                    workspace.focus_panel::<AgentPanel>(window, cx);
-                                });
-                            }
-                        } else {
-                            this.open_workspace_for_group(&path_list, window, cx);
-                        }
-                    }))
+                cx.listener(move |this, _, window, cx| {
+                    this.open_workspace_for_group(&path_list, window, cx);
+                })
             })
             .into_any_element()
     }
@@ -1934,7 +1932,7 @@ impl Sidebar {
         match entry {
             ListEntry::ProjectHeader { key, .. } => {
                 let path_list = key.path_list().clone();
-                self.toggle_collapse(&path_list, window, cx);
+                self.open_workspace_for_group(&path_list, window, cx);
             }
             ListEntry::Thread(thread) => {
                 let metadata = thread.metadata.clone();
