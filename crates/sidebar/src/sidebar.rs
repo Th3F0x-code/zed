@@ -156,7 +156,10 @@ struct ActiveThreadInfo {
 #[derive(Clone)]
 enum ThreadEntryWorkspace {
     Open(Entity<Workspace>),
-    Closed(PathList),
+    Closed {
+        path_list: PathList,
+        host: Option<RemoteConnectionOptions>,
+    },
 }
 
 #[derive(Clone)]
@@ -844,11 +847,15 @@ impl Sidebar {
                 // Resolve a ThreadEntryWorkspace for a thread row. If any open
                 // workspace's root paths match the thread's folder_paths, use
                 // Open; otherwise use Closed.
+                let group_host = group_key.host();
                 let resolve_workspace = |row: &ThreadMetadata| -> ThreadEntryWorkspace {
                     workspace_by_path_list
                         .get(&row.folder_paths)
                         .map(|ws| ThreadEntryWorkspace::Open((*ws).clone()))
-                        .unwrap_or_else(|| ThreadEntryWorkspace::Closed(row.folder_paths.clone()))
+                        .unwrap_or_else(|| ThreadEntryWorkspace::Closed {
+                            path_list: row.folder_paths.clone(),
+                            host: group_host.clone(),
+                        })
                 };
 
                 // Build a ThreadEntry from a metadata row.
@@ -925,7 +932,10 @@ impl Sidebar {
                         }
                         threads.push(make_thread_entry(
                             row,
-                            ThreadEntryWorkspace::Closed(worktree_path_list.clone()),
+                            ThreadEntryWorkspace::Closed {
+                                path_list: worktree_path_list.clone(),
+                                host: group_host.clone(),
+                            },
                         ));
                     }
                 }
@@ -1949,10 +1959,11 @@ impl Sidebar {
                         let workspace = workspace.clone();
                         self.activate_thread(metadata, &workspace, false, window, cx);
                     }
-                    ThreadEntryWorkspace::Closed(path_list) => {
+                    ThreadEntryWorkspace::Closed { path_list, host } => {
                         self.open_workspace_and_activate_thread(
                             metadata,
                             path_list.clone(),
+                            host.clone(),
                             window,
                             cx,
                         );
@@ -2146,6 +2157,7 @@ impl Sidebar {
         &mut self,
         metadata: ThreadMetadata,
         path_list: PathList,
+        host: Option<RemoteConnectionOptions>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2153,18 +2165,89 @@ impl Sidebar {
             return;
         };
 
-        let open_task = multi_workspace.update(cx, |this, cx| {
-            this.find_or_create_local_workspace(path_list, window, cx)
-        });
+        if let Some(connection_options) = host {
+            let window_handle = window.window_handle().downcast::<MultiWorkspace>();
+            let Some(window_handle) = window_handle else {
+                return;
+            };
 
-        cx.spawn_in(window, async move |this, cx| {
-            let workspace = open_task.await?;
-            this.update_in(cx, |this, window, cx| {
-                this.activate_thread(metadata, &workspace, false, window, cx);
-            })?;
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
+            let app_state = multi_workspace
+                .read(cx)
+                .workspace()
+                .read(cx)
+                .app_state()
+                .clone();
+            let paths = path_list.paths().to_vec();
+
+            cx.spawn_in(window, async move |this, cx| {
+                let delegate: std::sync::Arc<dyn remote::RemoteClientDelegate> =
+                    std::sync::Arc::new(remote_connection::HeadlessRemoteClientDelegate);
+                let remote_connection =
+                    remote::connect(connection_options.clone(), delegate.clone(), cx).await?;
+
+                let (_cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
+                let session = cx
+                    .update(|_, cx| {
+                        remote::RemoteClient::new(
+                            remote::remote_client::ConnectionIdentifier::setup(),
+                            remote_connection,
+                            cancel_rx,
+                            delegate,
+                            cx,
+                        )
+                    })?
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("Remote connection was cancelled"))?;
+
+                let new_project = cx.update(|_, cx| {
+                    project::Project::remote(
+                        session,
+                        app_state.client.clone(),
+                        app_state.node_runtime.clone(),
+                        app_state.user_store.clone(),
+                        app_state.languages.clone(),
+                        app_state.fs.clone(),
+                        true,
+                        cx,
+                    )
+                })?;
+
+                workspace::open_remote_project_with_existing_connection(
+                    connection_options,
+                    new_project,
+                    paths,
+                    app_state,
+                    window_handle,
+                    cx,
+                )
+                .await?;
+
+                let workspace = window_handle.update(cx, |multi_workspace, window, cx| {
+                    let workspace = multi_workspace.workspace().clone();
+                    multi_workspace.add(workspace.clone(), window, cx);
+                    workspace
+                })?;
+
+                this.update_in(cx, |this, window, cx| {
+                    this.activate_thread(metadata, &workspace, false, window, cx);
+                })?;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+        } else {
+            let open_task = multi_workspace.update(cx, |this, cx| {
+                this.find_or_create_local_workspace(path_list, window, cx)
+            });
+
+            cx.spawn_in(window, async move |this, cx| {
+                let workspace = open_task.await?;
+                this.update_in(cx, |this, window, cx| {
+                    this.activate_thread(metadata, &workspace, false, window, cx);
+                })?;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+        }
     }
 
     fn find_current_workspace_for_path_list(
@@ -2205,7 +2288,13 @@ impl Sidebar {
             {
                 self.activate_thread_in_other_window(metadata, workspace, target_window, cx);
             } else {
-                self.open_workspace_and_activate_thread(metadata, path_list, window, cx);
+                let host = self.multi_workspace.upgrade().and_then(|mw| {
+                    let mw = mw.read(cx);
+                    mw.project_groups(cx)
+                        .find(|(key, _)| key.path_list() == &metadata.main_worktree_paths)
+                        .and_then(|(key, _)| key.host())
+                });
+                self.open_workspace_and_activate_thread(metadata, path_list, host, window, cx);
             }
             return;
         }
@@ -2439,7 +2528,7 @@ impl Sidebar {
                 // when metadata is saved via ThreadMetadata::from_thread.
                 let target_workspace = match &next.workspace {
                     ThreadEntryWorkspace::Open(ws) => Some(ws.clone()),
-                    ThreadEntryWorkspace::Closed(_) => group_workspace,
+                    ThreadEntryWorkspace::Closed { .. } => group_workspace,
                 };
                 if let Some(ref ws) = target_workspace {
                     self.active_entry = Some(ActiveEntry::Thread {
@@ -2524,7 +2613,7 @@ impl Sidebar {
                 ListEntry::Thread(thread) => {
                     let workspace = match &thread.workspace {
                         ThreadEntryWorkspace::Open(workspace) => Some(workspace.clone()),
-                        ThreadEntryWorkspace::Closed(_) => current_header_path_list
+                        ThreadEntryWorkspace::Closed { .. } => current_header_path_list
                             .as_ref()
                             .and_then(|pl| self.workspace_for_group(pl, cx)),
                     }?;
@@ -2900,10 +2989,11 @@ impl Sidebar {
                         ThreadEntryWorkspace::Open(workspace) => {
                             this.activate_thread(metadata.clone(), workspace, false, window, cx);
                         }
-                        ThreadEntryWorkspace::Closed(path_list) => {
+                        ThreadEntryWorkspace::Closed { path_list, host } => {
                             this.open_workspace_and_activate_thread(
                                 metadata.clone(),
                                 path_list.clone(),
+                                host.clone(),
                                 window,
                                 cx,
                             );
@@ -3208,8 +3298,14 @@ impl Sidebar {
                 let workspace = workspace.clone();
                 self.activate_thread(metadata, &workspace, true, window, cx);
             }
-            ThreadEntryWorkspace::Closed(path_list) => {
-                self.open_workspace_and_activate_thread(metadata, path_list.clone(), window, cx);
+            ThreadEntryWorkspace::Closed { path_list, host } => {
+                self.open_workspace_and_activate_thread(
+                    metadata,
+                    path_list.clone(),
+                    host.clone(),
+                    window,
+                    cx,
+                );
             }
         }
     }
