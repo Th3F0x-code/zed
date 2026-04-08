@@ -455,7 +455,6 @@ pub fn render_redistributable_columns_resize_handles(
                     })
                 };
                 let on_drag_end: Option<Rc<dyn Fn(&mut App)>> = {
-                    let columns_state = columns_state.clone();
                     Some(Rc::new(move |cx| {
                         columns_state.update(cx, |state, _| state.commit_preview());
                     }))
