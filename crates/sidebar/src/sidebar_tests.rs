@@ -5702,3 +5702,168 @@ mod property_test {
         }
     }
 }
+
+#[gpui::test]
+async fn test_clicking_closed_remote_thread_opens_remote_workspace(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    init_test(cx);
+
+    cx.update(|cx| {
+        release_channel::init(semver::Version::new(0, 0, 0), cx);
+    });
+
+    let app_state = cx.update(|cx| {
+        let app_state = workspace::AppState::test(cx);
+        workspace::init(app_state.clone(), cx);
+        app_state
+    });
+
+    // Set up the remote server side.
+    let server_fs = FakeFs::new(server_cx.executor());
+    server_fs
+        .insert_tree(
+            "/project",
+            serde_json::json!({
+                ".git": {},
+                "src": { "main.rs": "fn main() {}" }
+            }),
+        )
+        .await;
+    server_fs.set_branch_name(Path::new("/project/.git"), Some("main"));
+
+    server_cx.update(|cx| {
+        release_channel::init(semver::Version::new(0, 0, 0), cx);
+    });
+
+    let (opts, server_session, _) = remote::RemoteClient::fake_server(cx, server_cx);
+
+    server_cx.update(remote_server::HeadlessProject::init);
+    let server_executor = server_cx.executor();
+    let _headless = server_cx.new(|cx| {
+        remote_server::HeadlessProject::new(
+            remote_server::HeadlessAppState {
+                session: server_session,
+                fs: server_fs.clone(),
+                http_client: Arc::new(http_client::BlockedHttpClient),
+                node_runtime: node_runtime::NodeRuntime::unavailable(),
+                languages: Arc::new(language::LanguageRegistry::new(server_executor.clone())),
+                extension_host_proxy: Arc::new(extension::ExtensionHostProxy::new()),
+                startup_time: std::time::Instant::now(),
+            },
+            false,
+            cx,
+        )
+    });
+
+    // Connect the client side and build a remote project.
+    let remote_client = remote::RemoteClient::connect_mock(opts, cx).await;
+    let project = cx.update(|cx| {
+        let project_client = client::Client::new(
+            Arc::new(clock::FakeSystemClock::new()),
+            http_client::FakeHttpClient::with_404_response(),
+            cx,
+        );
+        let user_store = cx.new(|cx| client::UserStore::new(project_client.clone(), cx));
+        project::Project::remote(
+            remote_client,
+            project_client,
+            node_runtime::NodeRuntime::unavailable(),
+            user_store,
+            app_state.languages.clone(),
+            app_state.fs.clone(),
+            false,
+            cx,
+        )
+    });
+
+    // Open the remote worktree.
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(Path::new("/project"), true, cx)
+        })
+        .await
+        .expect("should open remote worktree");
+    cx.run_until_parked();
+
+    // Verify the project is remote.
+    project.read_with(cx, |project, cx| {
+        assert!(!project.is_local(), "project should be remote");
+        assert!(
+            project.remote_connection_options(cx).is_some(),
+            "project should have remote connection options"
+        );
+    });
+
+    cx.update(|cx| <dyn fs::Fs>::set_global(app_state.fs.clone(), cx));
+
+    // Create MultiWorkspace with the remote project.
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    cx.run_until_parked();
+
+    // Save a thread whose folder_paths point to a worktree path that
+    // doesn't have an open workspace ("/project-wt-1"), but whose
+    // main_worktree_paths match the project group key so it appears
+    // in the sidebar under the remote group. This simulates a linked
+    // worktree workspace that was closed.
+    let remote_thread_id = acp::SessionId::new(Arc::from("remote-thread"));
+    let main_worktree_paths =
+        project.read_with(cx, |p, cx| p.project_group_key(cx).path_list().clone());
+    cx.update(|_window, cx| {
+        let metadata = ThreadMetadata {
+            session_id: remote_thread_id.clone(),
+            agent_id: agent::ZED_AGENT_ID.clone(),
+            title: "Remote Thread".into(),
+            updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
+            created_at: None,
+            folder_paths: PathList::new(&[PathBuf::from("/project-wt-1")]),
+            main_worktree_paths,
+            archived: false,
+        };
+        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save_manually(metadata, cx));
+    });
+    cx.run_until_parked();
+
+    // The thread should appear in the sidebar classified as Closed
+    // (its folder_paths don't match any open workspace).
+    focus_sidebar(&sidebar, cx);
+
+    let thread_index = sidebar.read_with(cx, |sidebar, _cx| {
+        sidebar
+            .contents
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    ListEntry::Thread(t) if &t.metadata.session_id == &remote_thread_id
+                )
+            })
+            .expect("remote thread should still be in sidebar")
+    });
+
+    // Select and confirm the remote thread entry.
+    sidebar.update_in(cx, |sidebar, _window, _cx| {
+        sidebar.selection = Some(thread_index);
+    });
+    cx.dispatch_action(menu::Confirm);
+    cx.run_until_parked();
+
+    // The workspace that was opened for this thread should be remote,
+    // not local. This is the key assertion — the bug is that
+    // open_workspace_and_activate_thread always calls
+    // find_or_create_local_workspace, creating a local workspace
+    // even for remote thread entries.
+    let active_workspace = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    active_workspace.read_with(cx, |workspace, cx| {
+        let active_project = workspace.project().read(cx);
+        assert!(
+            !active_project.is_local(),
+            "clicking a closed remote thread entry should open a remote workspace, not a local one"
+        );
+    });
+}
