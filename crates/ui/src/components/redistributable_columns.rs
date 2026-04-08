@@ -16,8 +16,8 @@ use crate::{
     px,
 };
 
-const RESIZE_COLUMN_WIDTH: f32 = 8.0;
-const RESIZE_DIVIDER_WIDTH: f32 = 1.0;
+pub(crate) const RESIZE_COLUMN_WIDTH: f32 = 8.0;
+pub(crate) const RESIZE_DIVIDER_WIDTH: f32 = 1.0;
 
 #[derive(Debug)]
 struct DraggedColumn(usize);
@@ -78,8 +78,9 @@ impl HeaderResizeInfo {
     pub fn reset_column(&self, col_idx: usize, window: &mut Window, cx: &mut App) {
         match &self.columns_state {
             ColumnsStateRef::Redistributable(weak) => {
-                weak.update(cx, |state, _| {
+                weak.update(cx, |state, cx| {
                     state.reset_column_to_initial_width(col_idx, window);
+                    cx.notify();
                 })
                 .ok();
             }
@@ -465,11 +466,12 @@ pub fn render_redistributable_columns_resize_handles(
                             let columns_state = columns_state.clone();
                             move |event, window, cx| {
                                 if event.click_count() >= 2 {
-                                    columns_state.update(cx, |columns, _| {
+                                    columns_state.update(cx, |columns, cx| {
                                         columns.reset_column_to_initial_width(
                                             current_column_ix,
                                             window,
                                         );
+                                        cx.notify();
                                     });
                                 }
 

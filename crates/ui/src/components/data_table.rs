@@ -3,11 +3,12 @@ use std::{ops::Range, rc::Rc};
 use crate::{
     ActiveTheme as _, AnyElement, App, Button, ButtonCommon as _, ButtonStyle, Color, Component,
     ComponentScope, Context, Div, ElementId, FixedWidth as _, FluentBuilder as _, HeaderResizeInfo,
-    Indicator, InteractiveElement, IntoElement, ParentElement, Pixels, RedistributableColumnsState,
-    RegisterComponent, RenderOnce, ScrollAxes, ScrollableHandle, Scrollbars, SharedString,
-    StatefulInteractiveElement, Styled, StyledExt as _, StyledTypography, TableResizeBehavior,
-    Window, WithScrollbar, bind_redistributable_columns, div, example_group_with_title, h_flex, px,
-    render_redistributable_columns_resize_handles, single_example,
+    Indicator, InteractiveElement, IntoElement, ParentElement, Pixels, RESIZE_COLUMN_WIDTH,
+    RESIZE_DIVIDER_WIDTH, RedistributableColumnsState, RegisterComponent, RenderOnce, ScrollAxes,
+    ScrollableHandle, Scrollbars, SharedString, StatefulInteractiveElement, Styled, StyledExt as _,
+    StyledTypography, TableResizeBehavior, Window, WithScrollbar, bind_redistributable_columns,
+    div, example_group_with_title, h_flex, px, render_redistributable_columns_resize_handles,
+    single_example,
     table_row::{IntoTableRow as _, TableRow},
     v_flex,
 };
@@ -21,9 +22,6 @@ use gpui::{
 pub mod table_row;
 #[cfg(test)]
 mod tests;
-
-const RESIZE_DIVIDER_WIDTH: f32 = 1.0;
-const RESIZE_COLUMN_WIDTH: f32 = 8.0;
 
 /// Used as the drag payload when resizing columns in `Resizable` mode.
 #[derive(Debug)]
@@ -811,41 +809,30 @@ impl RenderOnce for Table {
             None
         };
 
-        // Extract redistributable entity for drag/drop/prepaint handlers
-        let redistributable_entity =
-            interaction_state
-                .as_ref()
-                .and_then(|_| match &self.column_width_config {
-                    ColumnWidthConfig::Redistributable {
-                        columns_state: entity,
-                        ..
-                    } => Some(entity.clone()),
-                    _ => None,
-                });
-
-        // Extract resizable entity for drag-move handler
-        let resizable_entity =
-            interaction_state
-                .as_ref()
-                .and_then(|_| match &self.column_width_config {
-                    ColumnWidthConfig::Resizable(entity) => Some(entity.clone()),
-                    _ => None,
-                });
+        let (redistributable_entity, resizable_entity, resize_handles) =
+            if let Some(_) = interaction_state.as_ref() {
+                match &self.column_width_config {
+                    ColumnWidthConfig::Redistributable { columns_state, .. } => (
+                        Some(columns_state.clone()),
+                        None,
+                        Some(render_redistributable_columns_resize_handles(
+                            columns_state,
+                            window,
+                            cx,
+                        )),
+                    ),
+                    ColumnWidthConfig::Resizable(entity) => (
+                        None,
+                        Some(entity.clone()),
+                        Some(render_resize_handles_resizable(entity, window, cx)),
+                    ),
+                    _ => (None, None, None),
+                }
+            } else {
+                (None, None, None)
+            };
 
         let is_resizable = resizable_entity.is_some();
-
-        let resize_handles =
-            interaction_state
-                .as_ref()
-                .and_then(|_| match &self.column_width_config {
-                    ColumnWidthConfig::Redistributable { columns_state, .. } => Some(
-                        render_redistributable_columns_resize_handles(columns_state, window, cx),
-                    ),
-                    ColumnWidthConfig::Resizable(entity) => {
-                        Some(render_resize_handles_resizable(entity, window, cx))
-                    }
-                    _ => None,
-                });
 
         let table = div()
             .when_some(table_width, |this, width| this.w(width))
