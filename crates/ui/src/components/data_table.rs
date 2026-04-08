@@ -2,13 +2,13 @@ use std::{ops::Range, rc::Rc};
 
 use crate::{
     ActiveTheme as _, AnyElement, App, Button, ButtonCommon as _, ButtonStyle, Color, Component,
-    ComponentScope, Context, Div, ElementId, FixedWidth as _, FluentBuilder as _, HeaderResizeInfo,
-    Indicator, InteractiveElement, IntoElement, ParentElement, Pixels, RESIZE_COLUMN_WIDTH,
-    RESIZE_DIVIDER_WIDTH, RedistributableColumnsState, RegisterComponent, RenderOnce, ScrollAxes,
-    ScrollableHandle, Scrollbars, SharedString, StatefulInteractiveElement, Styled, StyledExt as _,
-    StyledTypography, TableResizeBehavior, Window, WithScrollbar, bind_redistributable_columns,
-    div, example_group_with_title, h_flex, px, render_redistributable_columns_resize_handles,
-    single_example,
+    ComponentScope, Context, Div, DraggedColumn, ElementId, FixedWidth as _, FluentBuilder as _,
+    HeaderResizeInfo, Indicator, InteractiveElement, IntoElement, ParentElement, Pixels,
+    RESIZE_COLUMN_WIDTH, RESIZE_DIVIDER_WIDTH, RedistributableColumnsState, RegisterComponent,
+    RenderOnce, ScrollAxes, ScrollableHandle, Scrollbars, SharedString, StatefulInteractiveElement,
+    Styled, StyledExt as _, StyledTypography, TableResizeBehavior, Window, WithScrollbar,
+    bind_redistributable_columns, div, example_group_with_title, h_flex, px,
+    render_redistributable_columns_resize_handles, single_example,
     table_row::{IntoTableRow as _, TableRow},
     v_flex,
 };
@@ -22,10 +22,6 @@ use gpui::{
 pub mod table_row;
 #[cfg(test)]
 mod tests;
-
-/// Used as the drag payload when resizing columns in `Resizable` mode.
-#[derive(Debug)]
-pub(crate) struct DraggedResizableColumn(pub(crate) usize);
 
 /// Represents an unchecked table row, which is a vector of elements.
 /// Will be converted into `TableRow<T>` internally
@@ -69,11 +65,11 @@ impl ResizableColumnsState {
 
     pub(crate) fn on_drag_move(
         &mut self,
-        drag_event: &DragMoveEvent<DraggedResizableColumn>,
+        drag_event: &DragMoveEvent<DraggedColumn>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let col_idx = drag_event.drag(cx).0;
+        let col_idx = drag_event.drag(cx).col_idx;
         let rem_size = window.rem_size();
         let drag_x = drag_event.event.position.x - drag_event.bounds.left();
 
@@ -755,14 +751,20 @@ fn render_resize_handles_resizable(
                                 cx.stop_propagation();
                             }
                         })
-                        .on_drag(DraggedResizableColumn(col_idx), {
-                            let is_highlighted = is_highlighted.clone();
-                            move |_, _offset, _window, cx| {
-                                is_highlighted.write(cx, true);
-                                cx.new(|_cx| Empty)
-                            }
-                        })
-                        .on_drop::<DraggedResizableColumn>(move |_, _, cx| {
+                        .on_drag(
+                            DraggedColumn {
+                                col_idx,
+                                state_id: columns_state.entity_id(),
+                            },
+                            {
+                                let is_highlighted = is_highlighted.clone();
+                                move |_, _offset, _window, cx| {
+                                    is_highlighted.write(cx, true);
+                                    cx.new(|_cx| Empty)
+                                }
+                            },
+                        )
+                        .on_drop::<DraggedColumn>(move |_, _, cx| {
                             is_highlighted.write(cx, false);
                         });
                 }
@@ -851,7 +853,10 @@ impl RenderOnce for Table {
                 bind_redistributable_columns(this, widths)
             })
             .when_some(resizable_entity, |this, entity| {
-                this.on_drag_move::<DraggedResizableColumn>(move |event, window, cx| {
+                this.on_drag_move::<DraggedColumn>(move |event, window, cx| {
+                    if event.drag(cx).state_id != entity.entity_id() {
+                        return;
+                    }
                     entity.update(cx, |state, cx| state.on_drag_move(event, window, cx));
                 })
             })

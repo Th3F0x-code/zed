@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AbsoluteLength, AppContext as _, Bounds, DefiniteLength, DragMoveEvent, Empty, Entity, Length,
-    WeakEntity,
+    AbsoluteLength, AppContext as _, Bounds, DefiniteLength, DragMoveEvent, Empty, Entity,
+    EntityId, Length, WeakEntity,
 };
 use itertools::intersperse_with;
 
@@ -19,8 +19,14 @@ use crate::{
 pub(crate) const RESIZE_COLUMN_WIDTH: f32 = 8.0;
 pub(crate) const RESIZE_DIVIDER_WIDTH: f32 = 1.0;
 
+/// Drag payload for column resize handles.
+/// Includes the `EntityId` of the owning column state so that
+/// `on_drag_move` handlers on unrelated tables ignore the event.
 #[derive(Debug)]
-struct DraggedColumn(usize);
+pub(crate) struct DraggedColumn {
+    pub(crate) col_idx: usize,
+    pub(crate) state_id: EntityId,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TableResizeBehavior {
@@ -276,7 +282,7 @@ impl RedistributableColumnsState {
 
         let mut col_position = 0.0;
         let rem_size = window.rem_size();
-        let col_idx = drag_event.drag(cx).0;
+        let col_idx = drag_event.drag(cx).col_idx;
 
         let divider_width = Self::get_fraction(
             &DefiniteLength::Absolute(AbsoluteLength::Pixels(px(RESIZE_DIVIDER_WIDTH))),
@@ -387,6 +393,9 @@ pub fn bind_redistributable_columns(
         .on_drag_move::<DraggedColumn>({
             let columns_state = columns_state.clone();
             move |event, window, cx| {
+                if event.drag(cx).state_id != columns_state.entity_id() {
+                    return;
+                }
                 columns_state.update(cx, |columns, cx| {
                     columns.on_drag_move(event, window, cx);
                 });
@@ -478,13 +487,19 @@ pub fn render_redistributable_columns_resize_handles(
                                 cx.stop_propagation();
                             }
                         })
-                        .on_drag(DraggedColumn(current_column_ix), {
-                            let is_highlighted = is_highlighted.clone();
-                            move |_, _offset, _window, cx| {
-                                is_highlighted.write(cx, true);
-                                cx.new(|_cx| Empty)
-                            }
-                        })
+                        .on_drag(
+                            DraggedColumn {
+                                col_idx: current_column_ix,
+                                state_id: columns_state.entity_id(),
+                            },
+                            {
+                                let is_highlighted = is_highlighted.clone();
+                                move |_, _offset, _window, cx| {
+                                    is_highlighted.write(cx, true);
+                                    cx.new(|_cx| Empty)
+                                }
+                            },
+                        )
                         .on_drop::<DraggedColumn>(move |_, _, cx| {
                             is_highlighted.write(cx, false);
                             columns_state.update(cx, |state, _| {
