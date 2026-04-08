@@ -501,6 +501,30 @@ impl ThreadMetadataStore {
         cx.background_spawn(async move { db.delete_archived_worktree(id).await })
     }
 
+    pub fn unlink_thread_from_all_archived_worktrees(
+        &self,
+        session_id: String,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>> {
+        let db = self.db.clone();
+        cx.background_spawn(async move {
+            db.unlink_thread_from_all_archived_worktrees(session_id)
+                .await
+        })
+    }
+
+    pub fn is_archived_worktree_referenced(
+        &self,
+        archived_worktree_id: i64,
+        cx: &App,
+    ) -> Task<anyhow::Result<bool>> {
+        let db = self.db.clone();
+        cx.background_spawn(async move {
+            db.is_archived_worktree_referenced(archived_worktree_id)
+                .await
+        })
+    }
+
     pub fn all_session_ids_for_path<'a>(
         &'a self,
         path_list: &PathList,
@@ -920,6 +944,31 @@ impl ThreadMetadataDb {
             stmt.exec()
         })
         .await
+    }
+
+    pub async fn unlink_thread_from_all_archived_worktrees(
+        &self,
+        session_id: String,
+    ) -> anyhow::Result<()> {
+        self.write(move |conn| {
+            let mut stmt = Statement::prepare(
+                conn,
+                "DELETE FROM thread_archived_worktrees WHERE session_id = ?",
+            )?;
+            stmt.bind(&session_id, 1)?;
+            stmt.exec()
+        })
+        .await
+    }
+
+    pub async fn is_archived_worktree_referenced(
+        &self,
+        archived_worktree_id: i64,
+    ) -> anyhow::Result<bool> {
+        self.select_row_bound::<i64, i64>(
+            "SELECT COUNT(*) FROM thread_archived_worktrees WHERE archived_worktree_id = ?1",
+        )?(archived_worktree_id)
+        .map(|count| count.unwrap_or(0) > 0)
     }
 }
 

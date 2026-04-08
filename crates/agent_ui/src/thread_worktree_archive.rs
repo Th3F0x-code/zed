@@ -12,7 +12,7 @@ use project::{
     git_store::{Repository, resolve_git_worktree_to_main_repo},
 };
 use util::ResultExt;
-use workspace::{AppState, MultiWorkspace, PathList, Workspace};
+use workspace::{AppState, MultiWorkspace, Workspace};
 
 use crate::thread_metadata_store::{ArchivedGitWorktree, ThreadMetadataStore};
 
@@ -144,7 +144,9 @@ async fn remove_root_after_worktree_removal(
     cx: &mut AsyncApp,
 ) -> Result<()> {
     for task in release_tasks {
-        task.await?;
+        if let Err(error) = task.await {
+            log::error!("Failed waiting for worktree release: {error:#}");
+        }
     }
 
     let (repo, _temp_project) = find_or_create_repository(&root.main_repo_path, cx).await?;
@@ -247,15 +249,11 @@ async fn rollback_root(root: &RootPlan, cx: &mut AsyncApp) {
         let task = affected.project.update(cx, |project, cx| {
             project.create_worktree(root.root_path.clone(), true, cx)
         });
-        let _ = task.await;
+        task.await.log_err();
     }
 }
 
-pub async fn persist_worktree_state(
-    root: &RootPlan,
-    folder_paths: &PathList,
-    cx: &mut AsyncApp,
-) -> Result<PersistOutcome> {
+pub async fn persist_worktree_state(root: &RootPlan, cx: &mut AsyncApp) -> Result<PersistOutcome> {
     let worktree_repo = root
         .worktree_repo
         .clone()
@@ -300,7 +298,7 @@ pub async fn persist_worktree_state(
             let rx = worktree_repo.update(cx, |repo, cx| {
                 repo.reset("HEAD~1".to_string(), ResetMode::Mixed, cx)
             });
-            let _ = rx.await;
+            rx.await.ok().and_then(|r| r.log_err());
             return Err(error);
         }
     };
@@ -315,7 +313,7 @@ pub async fn persist_worktree_state(
         let rx = worktree_repo.update(cx, |repo, cx| {
             repo.reset("HEAD~1".to_string(), ResetMode::Mixed, cx)
         });
-        let _ = rx.await;
+        rx.await.ok().and_then(|r| r.log_err());
         return Err(error.context("failed to stage all files including untracked"));
     }
 
@@ -341,7 +339,7 @@ pub async fn persist_worktree_state(
         let rx = worktree_repo.update(cx, |repo, cx| {
             repo.reset("HEAD~1".to_string(), ResetMode::Mixed, cx)
         });
-        let _ = rx.await;
+        rx.await.ok().and_then(|r| r.log_err());
         return Err(error);
     }
 
@@ -358,7 +356,7 @@ pub async fn persist_worktree_state(
             let rx = worktree_repo.update(cx, |repo, cx| {
                 repo.reset(format!("{}~1", staged_commit_hash), ResetMode::Mixed, cx)
             });
-            let _ = rx.await;
+            rx.await.ok().and_then(|r| r.log_err());
             return Err(error);
         }
     };
@@ -389,7 +387,7 @@ pub async fn persist_worktree_state(
             let rx = worktree_repo.update(cx, |repo, cx| {
                 repo.reset(format!("{}~1", staged_commit_hash), ResetMode::Mixed, cx)
             });
-            let _ = rx.await;
+            rx.await.ok().and_then(|r| r.log_err());
             return Err(error);
         }
     };
@@ -397,8 +395,15 @@ pub async fn persist_worktree_state(
     // Link all threads on this worktree to the archived record
     let session_ids: Vec<acp::SessionId> = store.read_with(cx, |store, _cx| {
         store
-            .all_session_ids_for_path(folder_paths)
-            .cloned()
+            .entries()
+            .filter(|thread| {
+                thread
+                    .folder_paths
+                    .paths()
+                    .iter()
+                    .any(|p| p.as_path() == root.root_path)
+            })
+            .map(|thread| thread.session_id.clone())
             .collect()
     });
 
@@ -426,7 +431,7 @@ pub async fn persist_worktree_state(
             let rx = worktree_repo.update(cx, |repo, cx| {
                 repo.reset(format!("{}~1", staged_commit_hash), ResetMode::Mixed, cx)
             });
-            let _ = rx.await;
+            rx.await.ok().and_then(|r| r.log_err());
             return Err(error.context("failed to link thread to archived worktree"));
         }
     }
@@ -474,7 +479,7 @@ pub async fn rollback_persist(outcome: &PersistOutcome, root: &RootPlan, cx: &mu
                 cx,
             )
         });
-        let _ = rx.await;
+        rx.await.ok().and_then(|r| r.log_err());
     }
 
     // Delete the git ref on main repo
@@ -483,7 +488,7 @@ pub async fn rollback_persist(outcome: &PersistOutcome, root: &RootPlan, cx: &mu
     {
         let ref_name = archived_worktree_ref_name(outcome.archived_worktree_id);
         let rx = main_repo.update(cx, |repo, _cx| repo.delete_ref(ref_name));
-        let _ = rx.await;
+        rx.await.ok().and_then(|r| r.log_err());
     }
 
     // Delete the DB record
@@ -646,12 +651,12 @@ pub async fn restore_worktree_via_git(
                 let rx = wt_repo.update(cx, |repo, cx| {
                     repo.reset(row.original_commit_hash.clone(), ResetMode::Mixed, cx)
                 });
-                let _ = rx.await;
+                rx.await.ok().and_then(|r| r.log_err());
                 // Delete the old branch and create fresh
                 let rx = wt_repo.update(cx, |repo, _cx| {
                     repo.create_branch(branch_name.clone(), None)
                 });
-                let _ = rx.await;
+                rx.await.ok().and_then(|r| r.log_err());
             }
         } else {
             // Branch doesn't exist or can't be switched to — create it.
@@ -690,6 +695,68 @@ pub async fn cleanup_archived_worktree_record(row: &ArchivedGitWorktree, cx: &mu
         .read_with(cx, |store, cx| store.delete_archived_worktree(row.id, cx))
         .await
         .log_err();
+}
+
+/// Cleans up all archived worktree data associated with a thread being deleted.
+///
+/// This unlinks the thread from all its archived worktrees and, for any
+/// archived worktree that is no longer referenced by any other thread,
+/// deletes the git ref and DB records.
+pub async fn cleanup_thread_archived_worktrees(session_id: &acp::SessionId, cx: &mut AsyncApp) {
+    let store = cx.update(|cx| ThreadMetadataStore::global(cx));
+
+    let archived_worktrees = store
+        .read_with(cx, |store, cx| {
+            store.get_archived_worktrees_for_thread(session_id.0.to_string(), cx)
+        })
+        .await;
+    let archived_worktrees = match archived_worktrees {
+        Ok(rows) => rows,
+        Err(error) => {
+            log::error!(
+                "Failed to fetch archived worktrees for thread {}: {error:#}",
+                session_id.0
+            );
+            return;
+        }
+    };
+
+    if archived_worktrees.is_empty() {
+        return;
+    }
+
+    if let Err(error) = store
+        .read_with(cx, |store, cx| {
+            store.unlink_thread_from_all_archived_worktrees(session_id.0.to_string(), cx)
+        })
+        .await
+    {
+        log::error!(
+            "Failed to unlink thread {} from archived worktrees: {error:#}",
+            session_id.0
+        );
+        return;
+    }
+
+    for row in &archived_worktrees {
+        let still_referenced = store
+            .read_with(cx, |store, cx| {
+                store.is_archived_worktree_referenced(row.id, cx)
+            })
+            .await;
+        match still_referenced {
+            Ok(true) => {}
+            Ok(false) => {
+                cleanup_archived_worktree_record(row, cx).await;
+            }
+            Err(error) => {
+                log::error!(
+                    "Failed to check if archived worktree {} is still referenced: {error:#}",
+                    row.id
+                );
+            }
+        }
+    }
 }
 
 pub fn all_open_workspaces(cx: &App) -> Vec<Entity<Workspace>> {

@@ -2493,20 +2493,13 @@ impl Sidebar {
             }
 
             let (cancel_tx, cancel_rx) = smol::channel::bounded(1);
-            let folder_paths = metadata.folder_paths.clone();
             let current_workspace = current_workspace.clone();
             let session_id = session_id.clone();
 
             let task = cx.spawn(async move |_this, cx| {
-                let result = Self::archive_worktree(
-                    roots,
-                    folder_paths,
-                    current_workspace,
-                    window_handle,
-                    cancel_rx,
-                    cx,
-                )
-                .await;
+                let result =
+                    Self::archive_worktree(roots, current_workspace, window_handle, cancel_rx, cx)
+                        .await;
 
                 match result {
                     Ok(ArchiveStatus::Success) => {
@@ -2652,7 +2645,6 @@ impl Sidebar {
 
     async fn archive_worktree(
         roots: Vec<thread_worktree_archive::RootPlan>,
-        folder_paths: PathList,
         workspace: Option<Entity<Workspace>>,
         window: WindowHandle<MultiWorkspace>,
         cancel_rx: smol::channel::Receiver<()>,
@@ -2718,7 +2710,7 @@ impl Sidebar {
 
         for root in &roots {
             // Check for cancellation before each root
-            if cancel_rx.try_recv().is_ok() {
+            if cancel_rx.is_closed() {
                 for (outcome, completed_root) in completed_persists.iter().rev() {
                     thread_worktree_archive::rollback_persist(outcome, completed_root, cx).await;
                 }
@@ -2727,8 +2719,7 @@ impl Sidebar {
 
             // Persist worktree state (git WIP commits + DB record)
             if root.worktree_repo.is_some() {
-                match thread_worktree_archive::persist_worktree_state(root, &folder_paths, cx).await
-                {
+                match thread_worktree_archive::persist_worktree_state(root, cx).await {
                     Ok(outcome) => {
                         completed_persists.push((outcome, root.clone()));
                     }
