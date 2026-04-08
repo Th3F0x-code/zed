@@ -1,21 +1,21 @@
 use std::{ops::Range, rc::Rc};
 
-use gpui::{
-    AbsoluteLength, AppContext as _, ClickEvent, DefiniteLength, DragMoveEvent, Empty, Entity,
-    EntityId, FocusHandle, Length, ListHorizontalSizingBehavior, ListSizingBehavior, ListState,
-    Point, ScrollHandle, Stateful, UniformListScrollHandle, WeakEntity, list, transparent_black,
-    uniform_list,
-};
 use crate::{
     ActiveTheme as _, AnyElement, App, Button, ButtonCommon as _, ButtonStyle, Color, Component,
     ComponentScope, Context, Div, ElementId, FixedWidth as _, FluentBuilder as _, HeaderResizeInfo,
     Indicator, InteractiveElement, IntoElement, ParentElement, Pixels, RedistributableColumnsState,
     RegisterComponent, RenderOnce, ScrollAxes, ScrollableHandle, Scrollbars, SharedString,
     StatefulInteractiveElement, Styled, StyledExt as _, StyledTypography, TableResizeBehavior,
-    Window, WithScrollbar, bind_redistributable_columns, div, example_group_with_title, h_flex,
-    px, render_redistributable_columns_resize_handles, single_example,
+    Window, WithScrollbar, bind_redistributable_columns, div, example_group_with_title, h_flex, px,
+    render_redistributable_columns_resize_handles, single_example,
     table_row::{IntoTableRow as _, TableRow},
     v_flex,
+};
+use gpui::{
+    AbsoluteLength, AppContext as _, ClickEvent, DefiniteLength, DragMoveEvent, Empty, Entity,
+    EntityId, FocusHandle, Length, ListHorizontalSizingBehavior, ListSizingBehavior, ListState,
+    Point, ScrollHandle, Stateful, UniformListScrollHandle, WeakEntity, list, transparent_black,
+    uniform_list,
 };
 
 pub mod table_row;
@@ -91,7 +91,7 @@ impl ResizableColumnsState {
         cx.notify();
     }
 
-    pub fn on_double_click(&mut self, col_idx: usize, _window: &mut Window) {
+    pub fn reset_column_to_initial_width(&mut self, col_idx: usize) {
         self.widths[col_idx] = self.initial_widths[col_idx];
     }
 
@@ -109,12 +109,6 @@ impl ResizableColumnsState {
             None => width,
         }
     }
-}
-
-/// Info passed to `render_table_header` for resizable-column double-click reset.
-pub struct ResizableHeaderInfo {
-    pub entity: WeakEntity<ResizableColumnsState>,
-    pub resize_behavior: TableRow<TableResizeBehavior>,
 }
 
 struct UniformListData {
@@ -282,9 +276,11 @@ impl ColumnWidthConfig {
             } => Some(entity.read(cx).widths_to_render()),
             ColumnWidthConfig::Resizable(entity) => {
                 let state = entity.read(cx);
-                Some(state.widths.map_cloned(|abs| {
-                    Length::Definite(DefiniteLength::Absolute(abs))
-                }))
+                Some(
+                    state
+                        .widths
+                        .map_cloned(|abs| Length::Definite(DefiniteLength::Absolute(abs))),
+                )
             }
         }
     }
@@ -313,7 +309,11 @@ impl ColumnWidthConfig {
     }
 
     /// ListHorizontalSizingBehavior for uniform_list.
-    pub fn list_horizontal_sizing(&self, window: &Window, cx: &App) -> ListHorizontalSizingBehavior {
+    pub fn list_horizontal_sizing(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> ListHorizontalSizingBehavior {
         match self {
             ColumnWidthConfig::Resizable(_) => ListHorizontalSizingBehavior::FitList,
             _ => match self.table_width(window, cx) {
@@ -591,7 +591,6 @@ pub fn render_table_header(
     headers: TableRow<impl IntoElement>,
     table_context: TableRenderContext,
     resize_info: Option<HeaderResizeInfo>,
-    resizable_info: Option<ResizableHeaderInfo>,
     entity_id: Option<EntityId>,
     cx: &mut App,
 ) -> impl IntoElement {
@@ -634,29 +633,7 @@ pub fn render_table_header(
                             if info.resize_behavior[header_idx].is_resizable() {
                                 this.on_click(move |event, window, cx| {
                                     if event.click_count() > 1 {
-                                        info.columns_state
-                                            .update(cx, |column, _| {
-                                                column.reset_column_to_initial_width(
-                                                    header_idx, window,
-                                                );
-                                            })
-                                            .ok();
-                                    }
-                                })
-                            } else {
-                                this
-                            }
-                        })
-                        .when_some(resizable_info.as_ref(), |this, info| {
-                            if info.resize_behavior[header_idx].is_resizable() {
-                                let entity = info.entity.clone();
-                                this.on_click(move |event: &ClickEvent, window, cx| {
-                                    if event.click_count() > 1 {
-                                        entity
-                                            .update(cx, |state, _| {
-                                                state.on_double_click(header_idx, window);
-                                            })
-                                            .ok();
+                                        info.reset_column(header_idx, window, cx);
                                     }
                                 })
                             } else {
@@ -770,10 +747,11 @@ fn render_resize_handles_resizable(
                         .cursor_col_resize()
                         .on_click({
                             let columns_state = columns_state.clone();
-                            move |event: &ClickEvent, window, cx| {
+                            move |event: &ClickEvent, _window, cx| {
                                 if event.click_count() >= 2 {
-                                    columns_state.update(cx, |state, _| {
-                                        state.on_double_click(col_idx, window);
+                                    columns_state.update(cx, |state, cx| {
+                                        state.reset_column_to_initial_width(col_idx);
+                                        cx.notify();
                                     });
                                 }
                                 cx.stop_propagation();
@@ -816,19 +794,11 @@ impl RenderOnce for Table {
                 .as_ref()
                 .and_then(|_| match &self.column_width_config {
                     ColumnWidthConfig::Redistributable { columns_state, .. } => {
-                        Some(HeaderResizeInfo::from_state(columns_state, cx))
+                        Some(HeaderResizeInfo::from_redistributable(columns_state, cx))
                     }
-                    _ => None,
-                });
-
-        let resizable_header_info =
-            interaction_state
-                .as_ref()
-                .and_then(|_| match &self.column_width_config {
-                    ColumnWidthConfig::Resizable(entity) => Some(ResizableHeaderInfo {
-                        entity: entity.downgrade(),
-                        resize_behavior: entity.read(cx).resize_behavior.clone(),
-                    }),
+                    ColumnWidthConfig::Resizable(entity) => {
+                        Some(HeaderResizeInfo::from_resizable(entity, cx))
+                    }
                     _ => None,
                 });
 
@@ -886,7 +856,6 @@ impl RenderOnce for Table {
                     headers,
                     table_context.clone(),
                     header_resize_info,
-                    resizable_header_info,
                     interaction_state.as_ref().map(Entity::entity_id),
                     cx,
                 ))
@@ -1011,14 +980,12 @@ impl RenderOnce for Table {
                     .child(table);
                 h_scroll_container.style().restrict_scroll_to_axis = Some(true);
 
-                let outer = table_wrapper
-                    .child(h_scroll_container)
-                    .custom_scrollbars(
-                        Scrollbars::new(ScrollAxes::Horizontal)
-                            .tracked_scroll_handle(&state.read(cx).horizontal_scroll_handle),
-                        window,
-                        cx,
-                    );
+                let outer = table_wrapper.child(h_scroll_container).custom_scrollbars(
+                    Scrollbars::new(ScrollAxes::Horizontal)
+                        .tracked_scroll_handle(&state.read(cx).horizontal_scroll_handle),
+                    window,
+                    cx,
+                );
 
                 let scrollbars = state
                     .read(cx)

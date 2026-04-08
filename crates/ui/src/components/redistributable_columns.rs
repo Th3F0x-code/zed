@@ -6,7 +6,10 @@ use gpui::{
 };
 use itertools::intersperse_with;
 
-use super::data_table::table_row::{IntoTableRow as _, TableRow};
+use super::data_table::{
+    ResizableColumnsState,
+    table_row::{IntoTableRow as _, TableRow},
+};
 use crate::{
     ActiveTheme as _, AnyElement, App, Context, Div, FluentBuilder as _, InteractiveElement,
     IntoElement, ParentElement, Pixels, StatefulInteractiveElement, Styled, Window, div, h_flex,
@@ -41,17 +44,52 @@ impl TableResizeBehavior {
 }
 
 #[derive(Clone)]
+pub(crate) enum ColumnsStateRef {
+    Redistributable(WeakEntity<RedistributableColumnsState>),
+    Resizable(WeakEntity<ResizableColumnsState>),
+}
+
+#[derive(Clone)]
 pub struct HeaderResizeInfo {
-    pub columns_state: WeakEntity<RedistributableColumnsState>,
+    pub(crate) columns_state: ColumnsStateRef,
     pub resize_behavior: TableRow<TableResizeBehavior>,
 }
 
 impl HeaderResizeInfo {
-    pub fn from_state(columns_state: &Entity<RedistributableColumnsState>, cx: &App) -> Self {
+    pub fn from_redistributable(
+        columns_state: &Entity<RedistributableColumnsState>,
+        cx: &App,
+    ) -> Self {
         let resize_behavior = columns_state.read(cx).resize_behavior().clone();
         Self {
-            columns_state: columns_state.downgrade(),
+            columns_state: ColumnsStateRef::Redistributable(columns_state.downgrade()),
             resize_behavior,
+        }
+    }
+
+    pub fn from_resizable(columns_state: &Entity<ResizableColumnsState>, cx: &App) -> Self {
+        let resize_behavior = columns_state.read(cx).resize_behavior().clone();
+        Self {
+            columns_state: ColumnsStateRef::Resizable(columns_state.downgrade()),
+            resize_behavior,
+        }
+    }
+
+    pub fn reset_column(&self, col_idx: usize, window: &mut Window, cx: &mut App) {
+        match &self.columns_state {
+            ColumnsStateRef::Redistributable(weak) => {
+                weak.update(cx, |state, _| {
+                    state.reset_column_to_initial_width(col_idx, window);
+                })
+                .ok();
+            }
+            ColumnsStateRef::Resizable(weak) => {
+                weak.update(cx, |state, cx| {
+                    state.reset_column_to_initial_width(col_idx);
+                    cx.notify();
+                })
+                .ok();
+            }
         }
     }
 }

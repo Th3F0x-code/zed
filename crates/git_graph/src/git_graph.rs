@@ -2556,7 +2556,8 @@ impl Render for GitGraph {
                     this.child(self.render_loading_spinner(cx))
                 })
         } else {
-            let header_resize_info = HeaderResizeInfo::from_state(&self.column_widths, cx);
+            let header_resize_info =
+                HeaderResizeInfo::from_redistributable(&self.column_widths, cx);
             let header_context = TableRenderContext::for_column_widths(
                 Some(self.column_widths.read(cx).widths_to_render()),
                 true,
@@ -2599,7 +2600,6 @@ impl Render for GitGraph {
                             ),
                             header_context,
                             Some(header_resize_info),
-                            None,
                             Some(self.column_widths.entity_id()),
                             cx,
                         ))
