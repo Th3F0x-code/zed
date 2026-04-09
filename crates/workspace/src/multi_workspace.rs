@@ -877,11 +877,9 @@ impl MultiWorkspace {
             .collect();
         let mut serialization_tasks = Vec::new();
         for workspace in &workspaces {
-            serialization_tasks.push(
-                workspace.update(cx, |workspace, inner_cx| {
-                    workspace.flush_serialization(window, inner_cx)
-                }),
-            );
+            serialization_tasks.push(workspace.update(cx, |workspace, inner_cx| {
+                workspace.flush_serialization(window, inner_cx)
+            }));
         }
 
         let remove_task = self.remove_project_group(key, window, cx);
@@ -895,15 +893,7 @@ impl MultiWorkspace {
             }
 
             cx.update(|cx| {
-                Workspace::new_local(
-                    paths,
-                    app_state,
-                    None,
-                    None,
-                    None,
-                    OpenMode::NewWindow,
-                    cx,
-                )
+                Workspace::new_local(paths, app_state, None, None, None, OpenMode::NewWindow, cx)
             })
             .await?;
 
@@ -1709,20 +1699,18 @@ impl Render for MultiWorkspace {
                             sidebar.cycle_thread(true, window, cx);
                         }
                     }))
-                    .on_action(cx.listener(
-                        |this: &mut Self, _: &PreviousThread, window, cx| {
+                    .on_action(
+                        cx.listener(|this: &mut Self, _: &PreviousThread, window, cx| {
                             if let Some(sidebar) = &this.sidebar {
                                 sidebar.cycle_thread(false, window, cx);
                             }
-                        },
-                    ))
+                        }),
+                    )
                     .when(self.project_group_keys.len() >= 2, |el| {
                         el.on_action(cx.listener(
                             |this: &mut Self, _: &MoveProjectToNewWindow, window, cx| {
-                                let key = this.project_group_key_for_workspace(
-                                    this.workspace(),
-                                    cx,
-                                );
+                                let key =
+                                    this.project_group_key_for_workspace(this.workspace(), cx);
                                 this.open_project_group_in_new_window(&key, window, cx)
                                     .detach_and_log_err(cx);
                             },
