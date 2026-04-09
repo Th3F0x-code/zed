@@ -1730,6 +1730,32 @@ impl Sidebar {
                             },
                         );
 
+                        let menu = if project_group_key.host().is_none() {
+                            menu.entry(
+                                "Open Project in New Window",
+                                None,
+                                {
+                                    let project_group_key = project_group_key.clone();
+                                    let multi_workspace = multi_workspace.clone();
+                                    move |window, cx| {
+                                        multi_workspace
+                                            .update(cx, |multi_workspace, cx| {
+                                                multi_workspace
+                                                    .open_project_group_in_new_window(
+                                                        &project_group_key,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                    .detach_and_log_err(cx);
+                                            })
+                                            .ok();
+                                    }
+                                },
+                            )
+                        } else {
+                            menu
+                        };
+
                         let project_group_key = project_group_key.clone();
                         let multi_workspace = multi_workspace.clone();
                         let weak_menu = menu_cx.weak_entity();
