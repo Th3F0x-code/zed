@@ -641,6 +641,7 @@ jobs:
   validate_release_assets:
     needs:
     - upload_release_assets
+    - compliance_check
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: release::validate_release_assets
@@ -688,7 +689,7 @@ jobs:
         if-no-files-found: error
         overwrite: true
     - name: send_compliance_slack_notification
-      if: failure() || ${{ needs.compliance_check.outputs.outcome }} != 'success'
+      if: failure() || needs.compliance_check.outputs.outcome != 'success'
       run: |
         if [ "$COMPLIANCE_OUTCOME" == "success" ]; then
             STATUS="✅ Compliance check passed for $COMPLIANCE_TAG"

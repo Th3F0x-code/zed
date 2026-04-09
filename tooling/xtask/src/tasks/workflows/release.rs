@@ -22,7 +22,7 @@ pub(crate) fn release() -> Workflow {
     let check_scripts = run_tests::check_scripts();
 
     let create_draft_release = create_draft_release();
-    let (compliance, job_output) = compliance_check();
+    let (non_blocking_compliance_run, job_output) = compliance_check();
 
     let bundle = ReleaseBundleJobs {
         linux_aarch64: bundle_linux(
@@ -58,7 +58,10 @@ pub(crate) fn release() -> Workflow {
     };
 
     let upload_release_assets = upload_release_assets(&[&create_draft_release], &bundle);
-    let validate_release_assets = validate_release_assets(&[&upload_release_assets], job_output);
+    let validate_release_assets = validate_release_assets(
+        &[&upload_release_assets, &non_blocking_compliance_run],
+        job_output,
+    );
 
     let auto_release_preview = auto_release_preview(&[&validate_release_assets]);
 
@@ -93,7 +96,10 @@ pub(crate) fn release() -> Workflow {
         .add_job(windows_clippy.name, windows_clippy.job)
         .add_job(check_scripts.name, check_scripts.job)
         .add_job(create_draft_release.name, create_draft_release.job)
-        .add_job(compliance.name, compliance.job)
+        .add_job(
+            non_blocking_compliance_run.name,
+            non_blocking_compliance_run.job,
+        )
         .map(|mut workflow| {
             for job in bundle.into_jobs() {
                 workflow = workflow.add_job(job.name, job.job);
@@ -243,7 +249,7 @@ pub(crate) fn add_compliance_steps(
                 non_blocking_outcome,
             } => Expression::new(format!(
                 "failure() || {prior_outcome} != 'success'",
-                prior_outcome = non_blocking_outcome.to_string()
+                prior_outcome = non_blocking_outcome.expr()
             )),
             ComplianceContext::Scheduled { .. } | ComplianceContext::ReleaseNonBlocking => {
                 Expression::new("always()")
