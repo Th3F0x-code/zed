@@ -568,6 +568,7 @@ impl AgentServerStore {
                                 agent_name.clone(),
                                 ExternalAgentEntry::new(
                                     Box::new(LocalRegistryNpxAgent {
+                                        fs: fs.clone(),
                                         node_runtime: node_runtime.clone(),
                                         project_environment: project_environment.clone(),
                                         version: agent.metadata.version.clone(),
@@ -1498,6 +1499,7 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
 }
 
 struct LocalRegistryNpxAgent {
+    fs: Arc<dyn Fs>,
     node_runtime: NodeRuntime,
     project_environment: Entity<ProjectEnvironment>,
     version: SharedString,
@@ -1527,6 +1529,7 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
         extra_env: HashMap<String, String>,
         cx: &mut AsyncApp,
     ) -> Task<Result<AgentServerCommand>> {
+        let fs = self.fs.clone();
         let node_runtime = self.node_runtime.clone();
         let project_environment = self.project_environment.downgrade();
         let package = self.package.clone();
@@ -1542,11 +1545,18 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
                 .await
                 .unwrap_or_default();
 
+            let prefix_dir = paths::external_agents_dir()
+                .join("registry")
+                .join("npx")
+                .join(Path::new(package.as_str()));
+            fs.create_dir(&prefix_dir).await?;
+
             let mut exec_args = vec!["--yes".to_string(), "--".to_string(), package.to_string()];
             exec_args.extend(args);
 
             let npm_command = node_runtime
                 .npm_command(
+                    Some(&prefix_dir),
                     "exec",
                     &exec_args.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
                 )
