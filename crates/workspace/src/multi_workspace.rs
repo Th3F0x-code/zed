@@ -822,12 +822,14 @@ impl MultiWorkspace {
         // Now remove the key.
         self.project_group_keys.retain(|k| k != key);
 
+        let excluded_workspaces = workspaces.clone();
         self.remove(
             workspaces,
             move |this, window, cx| {
                 if let Some(neighbor_key) = neighbor_key {
                     return this.find_or_create_local_workspace(
                         neighbor_key.path_list().clone(),
+                        &excluded_workspaces,
                         window,
                         cx,
                     );
@@ -861,9 +863,22 @@ impl MultiWorkspace {
         host: Option<&RemoteConnectionOptions>,
         cx: &App,
     ) -> Option<Entity<Workspace>> {
+        self.workspace_for_paths_excluding(path_list, host, &[], cx)
+    }
+
+    fn workspace_for_paths_excluding(
+        &self,
+        path_list: &PathList,
+        host: Option<&RemoteConnectionOptions>,
+        excluding: &[Entity<Workspace>],
+        cx: &App,
+    ) -> Option<Entity<Workspace>> {
         self.workspaces
             .iter()
             .find(|ws| {
+                if excluding.contains(ws) {
+                    return false;
+                }
                 let key = ws.read(cx).project_group_key(cx);
                 key.host().as_ref() == host
                     && PathList::new(&ws.read(cx).root_paths(cx)) == *path_list
@@ -904,7 +919,7 @@ impl MultiWorkspace {
         }
 
         let Some(connection_options) = host else {
-            return self.find_or_create_local_workspace(paths, window, cx);
+            return self.find_or_create_local_workspace(paths, &[], window, cx);
         };
 
         let app_state = self.workspace().read(cx).app_state().clone();
@@ -956,19 +971,26 @@ impl MultiWorkspace {
     /// or creates a new one (deserializing its saved state from the database).
     /// Never searches other windows or matches workspaces with a superset of
     /// the requested paths.
+    ///
+    /// `excluding` lists workspaces that should be skipped during the search
+    /// (e.g. workspaces that are about to be removed).
     pub fn find_or_create_local_workspace(
         &mut self,
         path_list: PathList,
+        excluding: &[Entity<Workspace>],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Workspace>>> {
-        if let Some(workspace) = self.workspace_for_paths(&path_list, None, cx) {
+        if let Some(workspace) = self.workspace_for_paths_excluding(&path_list, None, excluding, cx)
+        {
             self.activate(workspace.clone(), window, cx);
             return Task::ready(Ok(workspace));
         }
 
         if let Some(transient) = self.active_workspace.transient_workspace() {
-            if transient.read(cx).project_group_key(cx).path_list() == &path_list {
+            if transient.read(cx).project_group_key(cx).path_list() == &path_list
+                && !excluding.contains(transient)
+            {
                 return Task::ready(Ok(transient.clone()));
             }
         }
@@ -1503,7 +1525,7 @@ impl MultiWorkspace {
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Workspace>>> {
         if self.multi_workspace_enabled(cx) {
-            self.find_or_create_local_workspace(PathList::new(&paths), window, cx)
+            self.find_or_create_local_workspace(PathList::new(&paths), &[], window, cx)
         } else {
             let workspace = self.workspace().clone();
             cx.spawn_in(window, async move |_this, cx| {
