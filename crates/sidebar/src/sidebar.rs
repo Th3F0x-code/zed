@@ -1676,6 +1676,10 @@ impl Sidebar {
                 let multi_workspace = multi_workspace.clone();
                 let project_group_key = project_group_key.clone();
 
+                let has_multiple_projects = multi_workspace
+                    .read_with(cx, |mw, _| mw.project_group_keys().count() >= 2)
+                    .unwrap_or(false);
+
                 let menu =
                     ContextMenu::build_persistent(window, cx, move |menu, _window, menu_cx| {
                         let mut menu = menu
@@ -1730,10 +1734,12 @@ impl Sidebar {
                             },
                         );
 
-                        let menu = if project_group_key.host().is_none() {
+                        let menu = if project_group_key.host().is_none()
+                            && has_multiple_projects
+                        {
                             menu.entry(
                                 "Open Project in New Window",
-                                None,
+                                Some(Box::new(workspace::MoveProjectToNewWindow)),
                                 {
                                     let project_group_key = project_group_key.clone();
                                     let multi_workspace = multi_workspace.clone();
