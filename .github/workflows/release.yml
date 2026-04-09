@@ -340,6 +340,8 @@ jobs:
         COMPLIANCE_OUTCOME: ${{ steps.run-compliance-check.outcome }}
         COMPLIANCE_TAG: ${{ github.ref_name }}
         ARTIFACT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts
+    outputs:
+      outcome: ${{ steps.run-compliance-check.outputs.outcome }}
     timeout-minutes: 60
   bundle_linux_aarch64:
     needs:

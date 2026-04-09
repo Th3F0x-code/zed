@@ -180,7 +180,7 @@ pub(crate) fn add_compliance_steps(
     job: gh_workflow::Job,
     context: ComplianceContext,
 ) -> (gh_workflow::Job, StepOutput) {
-    fn run_compliance_check(context: ComplianceContext) -> (Step<Run>, StepOutput) {
+    fn run_compliance_check(context: &ComplianceContext) -> (Step<Run>, StepOutput) {
         let job = named::bash(
             formatdoc! {r#"
                 cargo xtask compliance {target} --report-path "{COMPLIANCE_REPORT_PATH}"
@@ -274,12 +274,16 @@ pub(crate) fn add_compliance_steps(
             format!("{CURRENT_ACTION_RUN_URL}#artifacts"),
         ));
 
-    let (compliance_step, check_result) = run_compliance_check(context);
+    let (compliance_step, check_result) = run_compliance_check(&context);
 
     (
         job.add_step(compliance_step)
             .add_step(upload_step)
-            .add_step(notification_step),
+            .add_step(notification_step)
+            .when(
+                matches!(context, ComplianceContext::ReleaseNonBlocking),
+                |step| step.outputs([("outcome".to_string(), check_result.to_string())]),
+            ),
         check_result,
     )
 }
