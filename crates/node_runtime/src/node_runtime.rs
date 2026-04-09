@@ -643,7 +643,6 @@ impl NodeRuntimeTrait for ManagedNodeRuntime {
 pub struct SystemNodeRuntime {
     node: PathBuf,
     npm: PathBuf,
-    global_node_modules: PathBuf,
     scratch_dir: PathBuf,
 }
 
@@ -677,17 +676,11 @@ impl SystemNodeRuntime {
         fs::create_dir(&scratch_dir).await.ok();
         fs::create_dir(scratch_dir.join("cache")).await.ok();
 
-        let mut this = Self {
+        Ok(Self {
             node,
             npm,
-            global_node_modules: PathBuf::default(),
             scratch_dir,
-        };
-        let output = this.run_npm_subcommand(None, None, "root", &["-g"]).await?;
-        this.global_node_modules =
-            PathBuf::from(String::from_utf8_lossy(&output.stdout).to_string());
-
-        Ok(this)
+        })
     }
 
     async fn detect() -> std::result::Result<Self, DetectError> {
