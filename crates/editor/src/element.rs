@@ -7675,7 +7675,7 @@ impl EditorElement {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     delta = delta.coalesce(event.delta);
 
-                    if event.modifiers.secondary() && editor.read(cx).mode().is_full() {
+                    if event.modifiers.secondary() && editor.read(cx).enable_mouse_wheel_zoom {
                         let delta_y = match event.delta {
                             ScrollDelta::Pixels(pixels) => pixels.y.into(),
                             ScrollDelta::Lines(lines) => lines.y,

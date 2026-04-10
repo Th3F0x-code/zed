@@ -1183,6 +1183,7 @@ pub struct Editor {
     delegate_open_excerpts: bool,
     enable_lsp_data: bool,
     enable_runnables: bool,
+    enable_mouse_wheel_zoom: bool,
     show_line_numbers: Option<bool>,
     use_relative_line_numbers: Option<bool>,
     show_git_diff_gutter: Option<bool>,
@@ -1972,6 +1973,9 @@ impl Editor {
         clone.read_only = self.read_only;
         clone.buffers_with_disabled_indent_guides =
             self.buffers_with_disabled_indent_guides.clone();
+        clone.enable_mouse_wheel_zoom = self.enable_mouse_wheel_zoom;
+        clone.enable_lsp_data = self.enable_lsp_data;
+        clone.enable_runnables = self.enable_runnables;
         clone
     }
 
@@ -2419,8 +2423,9 @@ impl Editor {
             delegate_expand_excerpts: false,
             delegate_stage_and_restore: false,
             delegate_open_excerpts: false,
-            enable_lsp_data: true,
-            enable_runnables: true,
+            enable_lsp_data: full_mode,
+            enable_runnables: full_mode,
+            enable_mouse_wheel_zoom: full_mode,
             show_git_diff_gutter: None,
             show_code_actions: None,
             show_runnables: None,
@@ -3351,6 +3356,15 @@ impl Editor {
     }
 
     pub fn set_mode(&mut self, mode: EditorMode) {
+        if self.enable_lsp_data {
+            self.enable_lsp_data = mode.is_full();
+        }
+        if self.enable_runnables {
+            self.enable_runnables = mode.is_full();
+        }
+        if self.enable_mouse_wheel_zoom {
+            self.enable_mouse_wheel_zoom = mode.is_full();
+        }
         self.mode = mode;
     }
 
@@ -26080,6 +26094,10 @@ impl Editor {
 
     fn disable_runnables(&mut self) {
         self.enable_runnables = false;
+    }
+
+    pub fn disable_mouse_wheel_zoom(&mut self) {
+        self.enable_mouse_wheel_zoom = false;
     }
 
     fn update_data_on_scroll(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
