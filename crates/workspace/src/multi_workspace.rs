@@ -1,4 +1,5 @@
 use anyhow::Result;
+use collections::vecset::VecSet;
 use gpui::PathPromptOptions;
 use gpui::{
     AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
@@ -271,34 +272,22 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
 /// sidebar. `Transient` workspaces exist outside the vec and are discarded
 /// when the user switches away.
 enum ActiveWorkspace {
-    /// A persistent workspace, identified by index into the `workspaces` vec.
-    Persistent(usize),
-    /// A workspace not in the `workspaces` vec that will be discarded on
+    /// A workspace in the `workspaces` set that will persist across switches.
+    Persistent(Entity<Workspace>),
+    /// A workspace not in the `workspaces` set that will be discarded on
     /// switch or promoted to persistent when the sidebar is opened.
     Transient(Entity<Workspace>),
 }
 
 impl ActiveWorkspace {
+    fn workspace(&self) -> &Entity<Workspace> {
+        match self {
+            Self::Persistent(ws) | Self::Transient(ws) => ws,
+        }
+    }
+
     fn transient_workspace(&self) -> Option<&Entity<Workspace>> {
         match self {
-            Self::Transient(workspace) => Some(workspace),
-            Self::Persistent(_) => None,
-        }
-    }
-
-    /// Sets the active workspace to transient, returning the previous
-    /// transient workspace (if any).
-    fn set_transient(&mut self, workspace: Entity<Workspace>) -> Option<Entity<Workspace>> {
-        match std::mem::replace(self, Self::Transient(workspace)) {
-            Self::Transient(old) => Some(old),
-            Self::Persistent(_) => None,
-        }
-    }
-
-    /// Sets the active workspace to persistent at the given index,
-    /// returning the previous transient workspace (if any).
-    fn set_persistent(&mut self, index: usize) -> Option<Entity<Workspace>> {
-        match std::mem::replace(self, Self::Persistent(index)) {
             Self::Transient(workspace) => Some(workspace),
             Self::Persistent(_) => None,
         }
@@ -307,7 +296,7 @@ impl ActiveWorkspace {
 
 pub struct MultiWorkspace {
     window_id: WindowId,
-    workspaces: Vec<Entity<Workspace>>,
+    workspaces: VecSet<Entity<Workspace>>,
     active_workspace: ActiveWorkspace,
     project_group_keys: Vec<ProjectGroupKey>,
     workspace_group_keys: HashMap<EntityId, ProjectGroupKey>,
@@ -364,7 +353,7 @@ impl MultiWorkspace {
             window_id: window.window_handle().window_id(),
             project_group_keys: Vec::new(),
             workspace_group_keys: HashMap::default(),
-            workspaces: Vec::new(),
+            workspaces: VecSet::new(),
             active_workspace: ActiveWorkspace::Transient(workspace),
             sidebar: None,
             sidebar_open: false,
@@ -484,8 +473,8 @@ impl MultiWorkspace {
         self.sidebar_open = true;
         if let ActiveWorkspace::Transient(workspace) = &self.active_workspace {
             let workspace = workspace.clone();
-            let index = self.promote_transient(workspace, cx);
-            self.active_workspace = ActiveWorkspace::Persistent(index);
+            self.promote_transient(workspace.clone(), cx);
+            self.active_workspace = ActiveWorkspace::Persistent(workspace);
         }
         let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
         for workspace in self.workspaces.iter() {
@@ -629,11 +618,11 @@ impl MultiWorkspace {
             // The active workspace is among the duplicates — drop the
             // incoming workspace instead so the user stays where they are.
             self.detach_workspace(workspace, cx);
-            self.workspaces.retain(|w| w != workspace);
+            self.workspaces.remove(workspace);
         } else {
             for ws in &duplicate_workspaces {
                 self.detach_workspace(ws, cx);
-                self.workspaces.retain(|w| w != ws);
+                self.workspaces.remove(ws);
             }
         }
 
@@ -670,18 +659,10 @@ impl MultiWorkspace {
             }
         }
 
-        // Restore the active workspace after removals may have shifted
-        // the index. If the previously active workspace was removed,
-        // fall back to the workspace whose key just changed.
-        if let ActiveWorkspace::Persistent(_) = &self.active_workspace {
-            let target = if self.workspaces.contains(&active_workspace) {
-                &active_workspace
-            } else {
-                workspace
-            };
-            if let Some(new_index) = self.workspaces.iter().position(|ws| ws == target) {
-                self.active_workspace = ActiveWorkspace::Persistent(new_index);
-            }
+        if !self.workspaces.contains(self.active_workspace.workspace())
+            && self.active_workspace.transient_workspace().is_none()
+        {
+            self.active_workspace = ActiveWorkspace::Persistent(workspace.clone());
         }
 
         self.remove_stale_project_group_keys(cx);
@@ -1097,10 +1078,7 @@ impl MultiWorkspace {
     }
 
     pub fn workspace(&self) -> &Entity<Workspace> {
-        match &self.active_workspace {
-            ActiveWorkspace::Persistent(index) => &self.workspaces[*index],
-            ActiveWorkspace::Transient(workspace) => workspace,
-        }
+        self.active_workspace.workspace()
     }
 
     pub fn workspaces(&self) -> impl Iterator<Item = &Entity<Workspace>> {
@@ -1124,24 +1102,21 @@ impl MultiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Re-activating the current workspace is a no-op.
         if self.workspace() == &workspace {
             self.focus_active_workspace(window, cx);
             return;
         }
 
-        // Resolve where we're going.
-        let new_index = if let Some(index) = self.workspaces.iter().position(|w| *w == workspace) {
-            Some(index)
-        } else if self.sidebar_open {
-            Some(self.insert_workspace(workspace.clone(), &*window, cx))
-        } else {
-            None
-        };
+        let is_persistent = self.workspaces.contains(&workspace);
 
-        // Transition the active workspace.
-        if let Some(index) = new_index {
-            if let Some(old) = self.active_workspace.set_persistent(index) {
+        let old_transient = self.active_workspace.transient_workspace().cloned();
+
+        if is_persistent || self.sidebar_open {
+            if !is_persistent {
+                self.insert_workspace(workspace.clone(), &*window, cx);
+            }
+            self.active_workspace = ActiveWorkspace::Persistent(workspace);
+            if let Some(old) = old_transient {
                 if self.sidebar_open {
                     self.promote_transient(old, cx);
                 } else {
@@ -1154,7 +1129,8 @@ impl MultiWorkspace {
             workspace.update(cx, |workspace, cx| {
                 workspace.set_multi_workspace(weak_self, cx);
             });
-            if let Some(old) = self.active_workspace.set_transient(workspace) {
+            self.active_workspace = ActiveWorkspace::Transient(workspace);
+            if let Some(old) = old_transient {
                 self.detach_workspace(&old, cx);
             }
         }
@@ -1171,21 +1147,18 @@ impl MultiWorkspace {
     pub fn retain_active_workspace(&mut self, cx: &mut Context<Self>) {
         if let ActiveWorkspace::Transient(workspace) = &self.active_workspace {
             let workspace = workspace.clone();
-            let index = self.promote_transient(workspace, cx);
-            self.active_workspace = ActiveWorkspace::Persistent(index);
+            self.promote_transient(workspace.clone(), cx);
+            self.active_workspace = ActiveWorkspace::Persistent(workspace);
             self.serialize(cx);
             cx.notify();
         }
     }
 
-    /// Promotes a former transient workspace into the persistent list.
-    /// Returns the index of the newly inserted workspace.
-    fn promote_transient(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> usize {
+    fn promote_transient(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) {
         let project_group_key = self.project_group_key_for_workspace(&workspace, cx);
         self.set_workspace_group_key(&workspace, project_group_key);
-        self.workspaces.push(workspace.clone());
+        self.workspaces.insert(workspace.clone());
         cx.emit(MultiWorkspaceEvent::WorkspaceAdded(workspace));
-        self.workspaces.len() - 1
     }
 
     /// Collapses to a single transient workspace, discarding all persistent
@@ -1206,33 +1179,26 @@ impl MultiWorkspace {
         cx.notify();
     }
 
-    /// Inserts a workspace into the list if not already present. Returns the
-    /// index of the workspace (existing or newly inserted). Does not change
-    /// the active workspace index.
     fn insert_workspace(
         &mut self,
         workspace: Entity<Workspace>,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> usize {
-        if let Some(index) = self.workspaces.iter().position(|w| *w == workspace) {
-            index
-        } else {
-            let project_group_key = self.project_group_key_for_workspace(&workspace, cx);
-
-            Self::subscribe_to_workspace(&workspace, window, cx);
-            self.sync_sidebar_to_workspace(&workspace, cx);
-            let weak_self = cx.weak_entity();
-            workspace.update(cx, |workspace, cx| {
-                workspace.set_multi_workspace(weak_self, cx);
-            });
-
-            self.set_workspace_group_key(&workspace, project_group_key);
-            self.workspaces.push(workspace.clone());
-            cx.emit(MultiWorkspaceEvent::WorkspaceAdded(workspace));
-            cx.notify();
-            self.workspaces.len() - 1
+    ) {
+        if self.workspaces.contains(&workspace) {
+            return;
         }
+        let project_group_key = self.project_group_key_for_workspace(&workspace, cx);
+        Self::subscribe_to_workspace(&workspace, window, cx);
+        self.sync_sidebar_to_workspace(&workspace, cx);
+        let weak_self = cx.weak_entity();
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_multi_workspace(weak_self, cx);
+        });
+        self.set_workspace_group_key(&workspace, project_group_key);
+        self.workspaces.insert(workspace.clone());
+        cx.emit(MultiWorkspaceEvent::WorkspaceAdded(workspace));
+        cx.notify();
     }
 
     /// Detaches a workspace: clears session state, DB binding, cached
@@ -1451,6 +1417,14 @@ impl MultiWorkspace {
             );
         }
 
+        if let ActiveWorkspace::Persistent(ws) = &self.active_workspace {
+            anyhow::ensure!(
+                self.workspaces.contains(ws),
+                "persistent active workspace {:?} is not in the workspaces set",
+                ws.entity_id(),
+            );
+        }
+
         Ok(())
     }
 
@@ -1595,20 +1569,12 @@ impl MultiWorkspace {
 
             // Actually remove the workspaces.
             this.update_in(cx, |this, _, cx| {
-                // Save a handle to the active workspace so we can restore
-                // its index after the removals shift the vec around.
-                let active_workspace = this.workspace().clone();
-
-                let mut removed_workspaces: Vec<Entity<Workspace>> = Vec::new();
-
-                this.workspaces.retain(|ws| {
-                    if workspaces.contains(ws) {
+                let mut removed_workspaces = Vec::new();
+                for ws in &workspaces {
+                    if this.workspaces.remove(ws) {
                         removed_workspaces.push(ws.clone());
-                        false
-                    } else {
-                        true
                     }
-                });
+                }
 
                 for workspace in &removed_workspaces {
                     this.detach_workspace(workspace, cx);
@@ -1617,13 +1583,10 @@ impl MultiWorkspace {
                 let removed_any = !removed_workspaces.is_empty();
 
                 if removed_any {
-                    // Restore the active workspace index after removals.
-                    if let Some(new_index) = this
-                        .workspaces
-                        .iter()
-                        .position(|ws| ws == &active_workspace)
-                    {
-                        this.active_workspace = ActiveWorkspace::Persistent(new_index);
+                    if !this.workspaces.contains(this.active_workspace.workspace()) {
+                        if let Some(fallback) = this.workspaces.iter().next() {
+                            this.active_workspace = ActiveWorkspace::Persistent(fallback.clone());
+                        }
                     }
 
                     this.serialize(cx);
