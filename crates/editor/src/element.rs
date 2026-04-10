@@ -7673,7 +7673,9 @@ impl EditorElement {
 
             move |event: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                    if event.modifiers.secondary() {
+                    delta = delta.coalesce(event.delta);
+
+                    if event.modifiers.secondary() && editor.read(cx).mode().is_full() {
                         let delta_y = match event.delta {
                             ScrollDelta::Pixels(pixels) => pixels.y.into(),
                             ScrollDelta::Lines(lines) => lines.y,
@@ -7701,10 +7703,7 @@ impl EditorElement {
                             }
                         };
 
-                        delta = delta.coalesce(event.delta);
                         editor.update(cx, |editor, cx| {
-                            let position_map: &PositionMap = &position_map;
-
                             let line_height = position_map.line_height;
                             let glyph_width = position_map.em_layout_width;
                             let (delta, axis) = match delta {
