@@ -1914,6 +1914,7 @@ impl Workspace {
                 OpenMode::NewWindow => None,
                 _ => requesting_window,
             };
+            let reuse_existing_window = window_to_replace.is_some();
 
             let (window, workspace): (WindowHandle<MultiWorkspace>, Entity<Workspace>) =
                 if let Some(window) = window_to_replace {
@@ -1922,7 +1923,7 @@ impl Workspace {
                         .map(|w| w.centered_layout)
                         .unwrap_or(false);
 
-                    let workspace = window.update(cx, |multi_workspace, window, cx| {
+                    let workspace = window.update(cx, |_multi_workspace, window, cx| {
                         let workspace = cx.new(|cx| {
                             let mut workspace = Workspace::new(
                                 Some(workspace_id),
@@ -1941,17 +1942,6 @@ impl Workspace {
 
                             workspace
                         });
-                        match open_mode {
-                            OpenMode::Activate => {
-                                multi_workspace.activate(workspace.clone(), window, cx);
-                            }
-                            OpenMode::Add => {
-                                multi_workspace.add(workspace.clone(), &*window, cx);
-                            }
-                            OpenMode::NewWindow => {
-                                unreachable!()
-                            }
-                        }
                         workspace
                     })?;
                     (window, workspace)
@@ -2057,6 +2047,20 @@ impl Workspace {
                         })
                         .log_err();
                 }
+            }
+
+            if reuse_existing_window {
+                window.update(cx, |multi_workspace, window, cx| match open_mode {
+                    OpenMode::Activate => {
+                        multi_workspace.activate(workspace.clone(), window, cx);
+                    }
+                    OpenMode::Add => {
+                        multi_workspace.add(workspace.clone(), &*window, cx);
+                    }
+                    OpenMode::NewWindow => {
+                        unreachable!()
+                    }
+                })?;
             }
 
             window
